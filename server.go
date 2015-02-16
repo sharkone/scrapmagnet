@@ -42,6 +42,7 @@ func (server *Server) Run() {
 
 	mux := routes.New()
 	mux.Get("/add", add)
+	mux.Get("/files", files)
 	mux.Get("/files/:infohash", files)
 	mux.Get("/files/:infohash/:file", files)
 	mux.Get("/shutdown", shutdown)
@@ -74,17 +75,22 @@ func files(w http.ResponseWriter, r *http.Request) {
 	infoHash := r.URL.Query().Get(":infohash")
 	file := r.URL.Query().Get(":file")
 
-	if magnet, ok := server.magnets[infoHash]; ok {
-		if file != "" {
-			r.URL.Path = file
-			log.Printf("[HTTP] Serving %s: %s\n", magnet.InfoHash, path.Join(magnet.DownloadDir, file))
-			http.FileServer(MagnetFileSystem{magnet}).ServeHTTP(w, r)
+	if infoHash != "" {
+		if magnet, ok := server.magnets[infoHash]; ok {
+			if file != "" {
+				r.URL.Path = file
+				log.Printf("[HTTP] Serving %s: %s\n", magnet.InfoHash, path.Join(magnet.DownloadDir, file))
+				http.FileServer(MagnetFileSystem{magnet}).ServeHTTP(w, r)
+			} else {
+				log.Println("[HTTP] Listing", magnet.InfoHash)
+				routes.ServeJson(w, magnet)
+			}
 		} else {
-			log.Println("[HTTP] Listing", magnet.InfoHash)
-			routes.ServeJson(w, magnet)
+			http.Error(w, "Invalid Magnet info hash", http.StatusNotFound)
 		}
 	} else {
-		http.Error(w, "Invalid Magnet info hash", http.StatusNotFound)
+		log.Println("[HTTP] Listing all Magnets")
+		routes.ServeJson(w, server.magnets)
 	}
 }
 

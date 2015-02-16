@@ -10,35 +10,19 @@ import (
 	"strconv"
 )
 
-type HttpSettings struct {
-	port int
-}
-
-type BitTorrentSettings struct {
-	port         int
-	downloadRate int
-	uploadRate   int
-	keepFiles    bool
-}
-
-type Settings struct {
-	http       HttpSettings
-	bitTorrent BitTorrentSettings
-}
-
 type Server struct {
-	settings Settings
-	magnets  map[string]*Magnet
+	settings   *Settings
+	downloader *Downloader
+	magnets    map[string]*Magnet
 }
 
-func NewServer() *Server {
-	return &Server{magnets: make(map[string]*Magnet)}
+func NewServer(settings *Settings) *Server {
+	return &Server{settings: settings, downloader: NewDownloader(settings), magnets: make(map[string]*Magnet)}
 }
-
-var server = NewServer()
 
 func (server *Server) Run() {
-	log.Println("[HTTP] Starting on port", server.settings.http.port)
+	server.downloader.Start()
+	log.Println("[HTTP] Listening on port", server.settings.http.port)
 
 	mux := routes.New()
 	mux.Get("/add", add)
@@ -60,11 +44,7 @@ func add(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if magnetLink != "" {
-		magnet := NewMagnet(magnetLink, downloadDir)
-		magnet.Files = append(magnet.Files, NewMagnetFile("Guardians of the Galaxy (2014).mp4"))
-		server.magnets[magnetLink] = magnet
-
-		log.Printf("[HTTP] Downloading %s to %s\n", magnetLink, downloadDir)
+		server.downloader.AddTorrent(magnetLink, downloadDir)
 		fmt.Fprintf(w, "")
 	} else {
 		http.Error(w, "Missing Magnet link", http.StatusBadRequest)
@@ -90,11 +70,12 @@ func files(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		log.Println("[HTTP] Listing all Magnets")
-		routes.ServeJson(w, server.magnets)
+		routes.ServeJson(w, server.downloader.handles)
 	}
 }
 
 func shutdown(w http.ResponseWriter, r *http.Request) {
-	log.Println("[HTTP] Shutting down")
+	log.Println("[HTTP] Stopping")
+	server.downloader.Stop()
 	os.Exit(0)
 }

@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"github.com/sharkone/libtorrent-go"
 	"log"
-	"time"
 )
 
 type TorrentFileInfo struct {
@@ -168,7 +167,7 @@ func (d *Downloader) Stop() {
 	// 	time.Sleep(time.Second)
 	// }
 
-	time.Sleep(time.Second * 5)
+	//time.Sleep(time.Second * 5)
 
 	if d.settings.bitTorrent.uPNPNatPMPEnabled {
 		log.Println("[BITTORRENT] Stopping UPNP/NATPMP")

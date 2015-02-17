@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/drone/routes"
+	"github.com/stretchr/graceful"
 	"log"
 	"mime"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 type Server struct {
 	settings   *Settings
+	http       *graceful.Server
 	downloader *Downloader
 }
 
@@ -20,9 +22,11 @@ func NewServer(settings *Settings) *Server {
 	return &Server{settings: settings, downloader: NewDownloader(settings)}
 }
 
-func (server *Server) Run() {
-	server.downloader.Start()
-	log.Println("[HTTP] Listening on port", server.settings.http.port)
+func (s *Server) Run() {
+	s.downloader.Start()
+	defer s.downloader.Stop()
+
+	log.Println("[HTTP] Listening on port", s.settings.http.port)
 
 	mime.AddExtensionType(".avi", "video/avi")
 	mime.AddExtensionType(".mkv", "video/x-matroska")
@@ -35,8 +39,15 @@ func (server *Server) Run() {
 	mux.Get("/files/:infohash/:filepath(.+)", files)
 	mux.Get("/shutdown", shutdown)
 
-	http.Handle("/", mux)
-	http.ListenAndServe(":"+strconv.Itoa(server.settings.http.port), nil)
+	s.http = &graceful.Server{
+		Server: &http.Server{
+			Addr:    ":" + strconv.Itoa(server.settings.http.port),
+			Handler: mux,
+		},
+	}
+
+	s.http.ListenAndServe()
+	log.Println("[HTTP] Stopping")
 }
 
 func add(w http.ResponseWriter, r *http.Request) {
@@ -85,7 +96,5 @@ func files(w http.ResponseWriter, r *http.Request) {
 }
 
 func shutdown(w http.ResponseWriter, r *http.Request) {
-	log.Println("[HTTP] Stopping")
-	server.downloader.Stop()
-	os.Exit(0)
+	server.http.Stop(0)
 }

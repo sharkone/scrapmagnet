@@ -1,34 +1,38 @@
 package main
 
 import (
-	"fmt"
 	"github.com/drone/routes"
 	"log"
+	"mime"
 	"net/http"
 	"os"
 	"path"
 	"strconv"
+	"time"
 )
 
 type Server struct {
 	settings   *Settings
 	downloader *Downloader
-	magnets    map[string]*Magnet
 }
 
 func NewServer(settings *Settings) *Server {
-	return &Server{settings: settings, downloader: NewDownloader(settings), magnets: make(map[string]*Magnet)}
+	return &Server{settings: settings, downloader: NewDownloader(settings)}
 }
 
 func (server *Server) Run() {
 	server.downloader.Start()
 	log.Println("[HTTP] Listening on port", server.settings.http.port)
 
+	mime.AddExtensionType(".avi", "video/avi")
+	mime.AddExtensionType(".mkv", "video/x-matroska")
+	mime.AddExtensionType(".mp4", "video/mp4")
+
 	mux := routes.New()
 	mux.Get("/add", add)
 	mux.Get("/files", files)
 	mux.Get("/files/:infohash", files)
-	mux.Get("/files/:infohash/:file", files)
+	mux.Get("/files/:infohash/:filepath(.+)", files)
 	mux.Get("/shutdown", shutdown)
 
 	http.Handle("/", mux)
@@ -45,7 +49,7 @@ func add(w http.ResponseWriter, r *http.Request) {
 
 	if magnetLink != "" {
 		server.downloader.AddTorrent(magnetLink, downloadDir)
-		fmt.Fprintf(w, "")
+		w.WriteHeader(http.StatusOK)
 	} else {
 		http.Error(w, "Missing Magnet link", http.StatusBadRequest)
 	}
@@ -53,24 +57,30 @@ func add(w http.ResponseWriter, r *http.Request) {
 
 func files(w http.ResponseWriter, r *http.Request) {
 	infoHash := r.URL.Query().Get(":infohash")
-	file := r.URL.Query().Get(":file")
+	filePath := r.URL.Query().Get(":filepath")
 
 	if infoHash != "" {
-		if magnet, ok := server.magnets[infoHash]; ok {
-			if file != "" {
-				r.URL.Path = file
-				log.Printf("[HTTP] Serving %s: %s\n", magnet.InfoHash, path.Join(magnet.DownloadDir, file))
-				http.FileServer(MagnetFileSystem{magnet}).ServeHTTP(w, r)
+		torrentInfo := server.downloader.GetTorrentInfo(infoHash)
+		if torrentInfo != nil {
+			if filePath != "" {
+				file, err := os.Open(path.Join(torrentInfo.DownloadDir, filePath))
+				if err != nil {
+					http.Error(w, "File not found", http.StatusNotFound)
+					return
+				}
+				defer file.Close()
+
+				log.Println("[HTTP] Serving:", filePath)
+				http.ServeContent(w, r, filePath, time.Time{}, file)
 			} else {
-				log.Println("[HTTP] Listing", magnet.InfoHash)
-				routes.ServeJson(w, magnet)
+				routes.ServeJson(w, torrentInfo)
 			}
 		} else {
-			http.Error(w, "Invalid Magnet info hash", http.StatusNotFound)
+			http.Error(w, "Invalid info hash", http.StatusNotFound)
+			return
 		}
 	} else {
-		log.Println("[HTTP] Listing all Magnets")
-		routes.ServeJson(w, server.downloader.handles)
+		routes.ServeJson(w, server.downloader.GetTorrentInfos())
 	}
 }
 

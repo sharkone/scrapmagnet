@@ -24,9 +24,6 @@ func NewServer(settings *Settings) *Server {
 
 func (s *Server) Run() {
 	s.downloader.Start()
-	defer s.downloader.Stop()
-
-	log.Println("[HTTP] Listening on port", s.settings.http.port)
 
 	mime.AddExtensionType(".avi", "video/avi")
 	mime.AddExtensionType(".mkv", "video/x-matroska")
@@ -40,14 +37,18 @@ func (s *Server) Run() {
 	mux.Get("/shutdown", shutdown)
 
 	s.http = &graceful.Server{
+		Timeout: 500 * time.Millisecond,
 		Server: &http.Server{
 			Addr:    ":" + strconv.Itoa(server.settings.http.port),
 			Handler: mux,
 		},
 	}
 
+	log.Println("[HTTP] Listening on port", s.settings.http.port)
 	s.http.ListenAndServe()
 	log.Println("[HTTP] Stopping")
+
+	s.downloader.Stop()
 }
 
 func add(w http.ResponseWriter, r *http.Request) {
@@ -96,5 +97,6 @@ func files(w http.ResponseWriter, r *http.Request) {
 }
 
 func shutdown(w http.ResponseWriter, r *http.Request) {
-	server.http.Stop(0)
+	w.WriteHeader(http.StatusOK)
+	server.http.Stop(500 * time.Millisecond)
 }

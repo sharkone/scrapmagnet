@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"github.com/sharkone/libtorrent-go"
 	"log"
+	"time"
 )
 
 type TorrentFileInfo struct {
@@ -159,15 +160,14 @@ func (d *Downloader) Start() {
 }
 
 func (d *Downloader) Stop() {
-	// for _, torrentHandle := range d.handles {
-	// 	d.removeTorrent(torrentHandle)
-	// }
+	for i := 0; i < int(d.session.Get_torrents().Size()); i++ {
+		d.removeTorrent(d.session.Get_torrents().Get(i))
+	}
 
-	// for len(d.handles) > 0 {
-	// 	time.Sleep(time.Second)
-	// }
-
-	//time.Sleep(time.Second * 5)
+	// TODO: Wait for alerts
+	for d.session.Get_torrents().Size() > 0 {
+		time.Sleep(time.Second)
+	}
 
 	if d.settings.bitTorrent.uPNPNatPMPEnabled {
 		log.Println("[BITTORRENT] Stopping UPNP/NATPMP")
@@ -193,9 +193,9 @@ func (d *Downloader) AddTorrent(magnetLink string, downloadDir string) {
 
 func (d *Downloader) removeTorrent(torrentHandle libtorrent.Torrent_handle) {
 	removeFlags := 0
-	if !d.settings.bitTorrent.keepFiles {
-		removeFlags = int(libtorrent.SessionDelete_files)
-	}
+	// if !d.settings.bitTorrent.keepFiles {
+	// 	removeFlags = int(libtorrent.SessionDelete_files)
+	// }
 	d.session.Remove_torrent(torrentHandle, removeFlags)
 }
 
@@ -205,6 +205,8 @@ func (d *Downloader) alertPump() {
 			alert := d.session.Pop_alert()
 			switch alert.Xtype() {
 			case libtorrent.Add_torrent_alertAlert_type:
+				// Ignore
+			case libtorrent.Cache_flushed_alertAlert_type:
 				// Ignore
 			case libtorrent.External_ip_alertAlert_type:
 				// Ignore

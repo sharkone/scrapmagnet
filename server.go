@@ -1,8 +1,6 @@
 package main
 
 import (
-	"github.com/drone/routes"
-	"github.com/stretchr/graceful"
 	"log"
 	"mime"
 	"net/http"
@@ -10,6 +8,9 @@ import (
 	"path"
 	"strconv"
 	"time"
+
+	"github.com/drone/routes"
+	"github.com/stretchr/graceful"
 )
 
 type Server struct {

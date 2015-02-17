@@ -2,9 +2,10 @@ package main
 
 import (
 	"fmt"
-	"github.com/sharkone/libtorrent-go"
 	"log"
 	"time"
+
+	"github.com/sharkone/libtorrent-go"
 )
 
 type TorrentFileInfo struct {
@@ -86,12 +87,13 @@ func NewTorrentInfo(torrentHandle libtorrent.Torrent_handle) *TorrentInfo {
 }
 
 type Downloader struct {
-	settings *Settings
-	session  libtorrent.Session
+	settings      *Settings
+	session       libtorrent.Session
+	removeChannel chan bool
 }
 
 func NewDownloader(settings *Settings) *Downloader {
-	return &Downloader{settings: settings}
+	return &Downloader{settings: settings, removeChannel: make(chan bool)}
 }
 
 func (d *Downloader) GetTorrentInfos() []*TorrentInfo {

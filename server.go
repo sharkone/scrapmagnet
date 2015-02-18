@@ -4,8 +4,6 @@ import (
 	"log"
 	"mime"
 	"net/http"
-	"os"
-	"path"
 	"strconv"
 	"time"
 
@@ -73,24 +71,24 @@ func files(w http.ResponseWriter, r *http.Request) {
 	filePath := r.URL.Query().Get(":filepath")
 
 	if infoHash != "" {
-		torrentInfo := server.downloader.GetTorrentInfo(infoHash)
-		if torrentInfo != nil {
+		if torrentInfo := server.downloader.GetTorrentInfo(infoHash); torrentInfo != nil {
 			if filePath != "" {
-				file, err := os.Open(path.Join(torrentInfo.DownloadDir, filePath))
-				if err != nil {
-					http.Error(w, "File not found", http.StatusNotFound)
-					return
+				if torrentFileInfo := torrentInfo.GetTorrentFileInfo(filePath); torrentFileInfo != nil {
+					if torrentFileInfo.Open(torrentInfo.DownloadDir) {
+						defer torrentFileInfo.Close()
+						log.Println("[HTTP] Serving:", filePath)
+						http.ServeContent(w, r, filePath, time.Time{}, torrentFileInfo)
+					} else {
+						http.Error(w, "Failed to open file", http.StatusInternalServerError)
+					}
+				} else {
+					http.NotFound(w, r)
 				}
-				defer file.Close()
-
-				log.Println("[HTTP] Serving:", filePath)
-				http.ServeContent(w, r, filePath, time.Time{}, file)
 			} else {
 				routes.ServeJson(w, torrentInfo)
 			}
 		} else {
 			http.Error(w, "Invalid info hash", http.StatusNotFound)
-			return
 		}
 	} else {
 		routes.ServeJson(w, server.downloader.GetTorrentInfos())

@@ -3,13 +3,144 @@ package main
 import (
 	"fmt"
 	"log"
+	"math"
+	"os"
+	"path"
+	"time"
 
 	"github.com/sharkone/libtorrent-go"
 )
 
 type TorrentFileInfo struct {
-	Name string `json:"name"`
-	Size int    `json:"size"`
+	Path string `json:"path"`
+	Size int64  `json:"size"`
+
+	torrentHandle libtorrent.Torrent_handle
+	pieceLength   int
+	offset        int64
+	file          *os.File
+}
+
+func (tfi *TorrentFileInfo) GetPieceIndexFromOffset(offset int64) int {
+	pieceIndex := int((tfi.offset + offset) / int64(tfi.pieceLength))
+	return pieceIndex
+}
+
+func (tfi *TorrentFileInfo) GetTotalPieceCount() int {
+	startPieceIndex := tfi.GetPieceIndexFromOffset(0)
+	endPieceIndex := tfi.GetPieceIndexFromOffset(tfi.Size)
+	return int(math.Max(float64(1), float64(endPieceIndex-startPieceIndex)))
+}
+
+// func (tfi *TorrentFileInfo) GetPreloadBufferPieceCount() int {
+// 	totalPieceCount := tfi.GetTotalPieceCount()
+// 	highPriorityCount := int(math.Min(float64(totalPieceCount), math.Ceil(float64(totalPieceCount)*0.005)))
+// 	return highPriorityCount
+// }
+
+func (tfi *TorrentFileInfo) Open(downloadDir string) bool {
+	if tfi.file == nil {
+		fullpath := path.Join(downloadDir, tfi.Path)
+
+		for {
+			if _, err := os.Stat(fullpath); err == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+
+		tfi.file, _ = os.Open(fullpath)
+	}
+
+	return tfi.file != nil
+}
+
+func (tfi *TorrentFileInfo) Close() {
+	if tfi.file != nil {
+		tfi.file.Close()
+	}
+}
+
+func (tfi *TorrentFileInfo) Read(data []byte) (int, error) {
+	totalRead := 0
+	size := len(data)
+
+	for size > 0 {
+		readSize := int64(math.Min(float64(size), float64(tfi.pieceLength)))
+
+		currentPosition, _ := tfi.file.Seek(0, os.SEEK_CUR)
+		pieceIndex := tfi.GetPieceIndexFromOffset(currentPosition + readSize)
+
+		//log.Println("[BITTORRENT]", tfi.file.Fd(), "Read from piece:", pieceIndex, readSize, currentPosition)
+		/*if*/ tfi.waitForPiece(pieceIndex) /*{
+			log.Println("[BITTORRENT]", tfi.file.Fd(), "Virtual read successful from piece:", pieceIndex)
+			return totalRead, nil
+		} else {*/
+		tmpData := make([]byte, readSize)
+		read, err := tfi.file.Read(tmpData)
+		//log.Println("[BITTORRENT]", tfi.file.Fd(), "Read successful from piece:", pieceIndex, read, currentPosition)
+		if err != nil {
+			totalRead += read
+			log.Println("[BITTORRENT]", tfi.file.Fd(), "Read failed!", read, readSize, currentPosition, err)
+			return totalRead, err
+		}
+
+		copy(data[totalRead:], tmpData[:read])
+		totalRead += read
+		size -= read
+		/*}*/
+	}
+
+	return totalRead, nil
+}
+
+func (tfi *TorrentFileInfo) Seek(offset int64, whence int) (int64, error) {
+	newPosition := int64(0)
+
+	switch whence {
+	case os.SEEK_SET:
+		newPosition = offset
+	case os.SEEK_CUR:
+		currentPosition, _ := tfi.file.Seek(0, os.SEEK_CUR)
+		newPosition = currentPosition + offset
+	case os.SEEK_END:
+		newPosition = tfi.Size + offset
+	}
+
+	pieceIndex := tfi.GetPieceIndexFromOffset(newPosition)
+	//log.Println("[BITTORRENT]", tfi.file.Fd(), "Seek to", newPosition, "piece:", pieceIndex)
+	/*if*/ tfi.waitForPiece(pieceIndex) /*{
+		log.Println("[BITTORRENT]", tfi.file.Fd(), "Virtual seek successful to", newPosition, "piece:", pieceIndex)
+		return newPosition, nil
+	} else {*/
+	ret, err := tfi.file.Seek(offset, whence)
+	if err != nil || ret != newPosition {
+		log.Println("[BITTORRENT]", tfi.file.Fd(), "Seek failed", ret, newPosition, err)
+	}
+	//log.Println("[BITTORRENT]", tfi.file.Fd(), "Seek successful to", newPosition, "piece:", pieceIndex)
+	return ret, err
+	/*}*/
+}
+
+func (tfi *TorrentFileInfo) waitForPiece(pieceIndex int) bool {
+	if !tfi.torrentHandle.Have_piece(pieceIndex) {
+		/*endPieceIndex := tfi.GetPieceIndexFromOffset(tfi.Size)
+		if (endPieceIndex - pieceIndex) <= tfi.GetPreloadBufferPieceCount()*10 {
+			return true
+		} else {*/
+		tfi.torrentHandle.Piece_priority(pieceIndex, 7)
+		log.Println("[BITTORRENT]", tfi.file.Fd(), "Waiting for piece", pieceIndex)
+		for {
+			time.Sleep(100 * time.Millisecond)
+			if tfi.torrentHandle.Have_piece(pieceIndex) {
+				log.Println("[BITTORRENT]", tfi.file.Fd(), "Piece", pieceIndex, "ready")
+				break
+			}
+		}
+		/*}*/
+	}
+
+	return false
 }
 
 type TorrentInfo struct {
@@ -19,7 +150,8 @@ type TorrentInfo struct {
 	State        int               `json:"state"`
 	StateStr     string            `json:"state_str"`
 	Files        []TorrentFileInfo `json:"files"`
-	Size         int               `json:"size"`
+	Size         int64             `json:"size"`
+	Pieces       int               `json:"pieces"`
 	Progress     float32           `json:"progress"`
 	DownloadRate int               `json:"download_rate"`
 	UploadRate   int               `json:"upload_rate"`
@@ -73,16 +205,29 @@ func NewTorrentInfo(torrentHandle libtorrent.Torrent_handle) *TorrentInfo {
 			result := []TorrentFileInfo{}
 			for i := 0; i < torrentInfo.Files().Num_files(); i++ {
 				result = append(result, TorrentFileInfo{
-					Name: torrentInfo.Files().File_path(i),
-					Size: int(torrentInfo.Files().File_size(i)),
+					Path:          torrentInfo.Files().File_path(i),
+					Size:          torrentInfo.Files().File_size(i),
+					torrentHandle: torrentHandle,
+					offset:        torrentInfo.Files().File_offset(i),
+					pieceLength:   torrentInfo.Files().Piece_length(),
 				})
 			}
 			return result
 		}(torrentInfo)
-		result.Size = int(torrentInfo.Files().Total_size())
+		result.Size = torrentInfo.Files().Total_size()
+		result.Pieces = torrentInfo.Num_pieces()
 	}
 
 	return result
+}
+
+func (ti *TorrentInfo) GetTorrentFileInfo(filePath string) *TorrentFileInfo {
+	for _, torrentFileInfo := range ti.Files {
+		if torrentFileInfo.Path == filePath {
+			return &torrentFileInfo
+		}
+	}
+	return nil
 }
 
 type Downloader struct {

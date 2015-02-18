@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/sharkone/libtorrent-go"
 )
@@ -90,10 +89,11 @@ type Downloader struct {
 	settings      *Settings
 	session       libtorrent.Session
 	removeChannel chan bool
+	deleteChannel chan bool
 }
 
 func NewDownloader(settings *Settings) *Downloader {
-	return &Downloader{settings: settings, removeChannel: make(chan bool)}
+	return &Downloader{settings: settings, removeChannel: make(chan bool), deleteChannel: make(chan bool)}
 }
 
 func (d *Downloader) GetTorrentInfos() []*TorrentInfo {
@@ -166,11 +166,6 @@ func (d *Downloader) Stop() {
 		d.removeTorrent(d.session.Get_torrents().Get(i))
 	}
 
-	// TODO: Wait for alerts
-	for d.session.Get_torrents().Size() > 0 {
-		time.Sleep(time.Second)
-	}
-
 	if d.settings.bitTorrent.uPNPNatPMPEnabled {
 		log.Println("[BITTORRENT] Stopping UPNP/NATPMP")
 		d.session.Stop_natpmp()
@@ -195,10 +190,15 @@ func (d *Downloader) AddTorrent(magnetLink string, downloadDir string) {
 
 func (d *Downloader) removeTorrent(torrentHandle libtorrent.Torrent_handle) {
 	removeFlags := 0
-	// if !d.settings.bitTorrent.keepFiles {
-	// 	removeFlags = int(libtorrent.SessionDelete_files)
-	// }
+	if !d.settings.bitTorrent.keepFiles {
+		removeFlags = int(libtorrent.SessionDelete_files)
+	}
 	d.session.Remove_torrent(torrentHandle, removeFlags)
+	<-d.removeChannel
+
+	if removeFlags != 0 {
+		<-d.deleteChannel
+	}
 }
 
 func (d *Downloader) alertPump() {
@@ -206,6 +206,15 @@ func (d *Downloader) alertPump() {
 		if d.session.Wait_for_alert(libtorrent.Seconds(1)).Swigcptr() != 0 {
 			alert := d.session.Pop_alert()
 			switch alert.Xtype() {
+			case libtorrent.Torrent_removed_alertAlert_type:
+				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
+				d.removeChannel <- true
+			case libtorrent.Torrent_deleted_alertAlert_type:
+				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
+				d.deleteChannel <- true
+			case libtorrent.Torrent_delete_failed_alertAlert_type:
+				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
+				d.deleteChannel <- false
 			case libtorrent.Add_torrent_alertAlert_type:
 				// Ignore
 			case libtorrent.Cache_flushed_alertAlert_type:

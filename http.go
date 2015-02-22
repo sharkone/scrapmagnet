@@ -63,7 +63,6 @@ func files(w http.ResponseWriter, r *http.Request) {
 		if torrentInfo := getTorrentInfo(infoHash); torrentInfo != nil {
 			if filePath != "" {
 				if torrentFileInfo := torrentInfo.GetTorrentFileInfo(filePath); torrentFileInfo != nil {
-
 					if torrentFileInfo.Open(torrentInfo.DownloadDir) {
 						torrentInfo.connectionChan <- 1
 						defer torrentFileInfo.Close()

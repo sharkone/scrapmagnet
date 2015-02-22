@@ -1,38 +1,34 @@
 package main
 
-import (
-	"flag"
-)
-
-type HttpSettings struct {
-	port int
-}
-
-type BitTorrentSettings struct {
-	port              int
-	uPNPNatPMPEnabled bool
-	maxDownloadRate   int
-	maxUploadRate     int
-	keepFiles         bool
-}
+import "flag"
 
 type Settings struct {
-	http       HttpSettings
-	bitTorrent BitTorrentSettings
+	httpPort                int
+	bitTorrentPort          int
+	uPNPNatPMPEnabled       bool
+	maxDownloadRate         int
+	maxUploadRate           int
+	keepFiles               bool
+	inactivityPauseTimeout  int
+	inactivityRemoveTimeout int
 }
 
-var server *Server
+var settings Settings
 
 func main() {
-	settings := Settings{}
-	flag.IntVar(&settings.http.port, "http-port", 8080, "Port used for HTTP server")
-	flag.IntVar(&settings.bitTorrent.port, "torrent-port", 6900, "Port used for BitTorrent incoming connections")
-	flag.BoolVar(&settings.bitTorrent.uPNPNatPMPEnabled, "torrent-upnp-natpmp-enabled", true, "Enable UPNP/NATPMP")
-	flag.IntVar(&settings.bitTorrent.maxDownloadRate, "torrent-max-download-rate", 0, "Maximum download rate in kB/s, 0 = Unlimited")
-	flag.IntVar(&settings.bitTorrent.maxUploadRate, "torrent-max-upload-rate", 0, "Maximum upload rate in kB/s, 0 = Unlimited")
-	flag.BoolVar(&settings.bitTorrent.keepFiles, "torrent-keep-files", false, "Keep downloaded files upon stopping")
+	settings = Settings{}
+	flag.IntVar(&settings.httpPort, "http-port", 8080, "Port used for HTTP server")
+	flag.IntVar(&settings.bitTorrentPort, "bittorrent-port", 6900, "Port used for BitTorrent incoming connections")
+	flag.BoolVar(&settings.uPNPNatPMPEnabled, "upnp-natpmp-enabled", true, "Enable UPNP/NATPMP")
+	flag.IntVar(&settings.maxDownloadRate, "max-download-rate", 0, "Maximum download rate in kB/s, 0 = Unlimited")
+	flag.IntVar(&settings.maxUploadRate, "max-upload-rate", 0, "Maximum upload rate in kB/s, 0 = Unlimited")
+	flag.BoolVar(&settings.keepFiles, "keep-files", false, "Keep downloaded files upon stopping")
+	flag.IntVar(&settings.inactivityPauseTimeout, "inactivity-pause-timeout", 30, "Torrents will be paused after some inactivity")
+	flag.IntVar(&settings.inactivityRemoveTimeout, "inactivity-remove-timeout", 600, "Torrents will be removed after some inactivity")
 	flag.Parse()
 
-	server = NewServer(&settings)
-	server.Run()
+	bitTorrentStart()
+	httpStart()
+	httpStop()
+	bitTorrentStop()
 }

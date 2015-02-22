@@ -15,7 +15,7 @@ PLATFORMS = android-arm		\
 			windows-x64
 
 DOCKER 		 = docker
-DOCKER_IMAGE = steeve/libtorrent-go
+DOCKER_IMAGE = sharkone/libtorrent-go
 
 all: build
 
@@ -32,8 +32,15 @@ run: build
 ###############################################################################
 # Cross-compilation environment (inside each Docker image)
 ###############################################################################
+ifeq ($(CROSS_GOOS), windows)
+OUT_NAME = $(NAME).exe
+else
+OUT_NAME = $(NAME)
+endif
+
 cc-build:
-	GOOS=$(CROSS_GOOS) GOARCH=$(CROSS_GOARCH) GOARM=$(CROSS_GOARM) go build -o $(NAME)_$(CROSS_GOOS)-$(CROSS_GOARCH)
+	mkdir -p $(CROSS_GOOS)-$(CROSS_GOARCH)
+	GOOS=$(CROSS_GOOS) GOARCH=$(CROSS_GOARCH) GOARM=$(CROSS_GOARM) go build -o $(CROSS_GOOS)-$(CROSS_GOARCH)/$(OUT_NAME)
 
 cc-run:
-	./$(NAME)_$(CROSS_GOOS)-$(CROSS_GOARCH)
+	$(CROSS_GOOS)-$(CROSS_GOARCH)/$(OUT_NAME)

@@ -15,10 +15,10 @@ type TorrentFileInfo struct {
 	Path string `json:"path"`
 	Size int64  `json:"size"`
 
-	torrentHandle libtorrent.Torrent_handle
-	pieceLength   int
-	offset        int64
-	file          *os.File
+	handle      libtorrent.Torrent_handle
+	pieceLength int
+	offset      int64
+	file        *os.File
 }
 
 func (tfi *TorrentFileInfo) GetPieceIndexFromOffset(offset int64) int {
@@ -31,12 +31,6 @@ func (tfi *TorrentFileInfo) GetTotalPieceCount() int {
 	endPieceIndex := tfi.GetPieceIndexFromOffset(tfi.Size)
 	return int(math.Max(float64(1), float64(endPieceIndex-startPieceIndex)))
 }
-
-// func (tfi *TorrentFileInfo) GetPreloadBufferPieceCount() int {
-// 	totalPieceCount := tfi.GetTotalPieceCount()
-// 	highPriorityCount := int(math.Min(float64(totalPieceCount), math.Ceil(float64(totalPieceCount)*0.005)))
-// 	return highPriorityCount
-// }
 
 func (tfi *TorrentFileInfo) Open(downloadDir string) bool {
 	if tfi.file == nil {
@@ -123,16 +117,16 @@ func (tfi *TorrentFileInfo) Seek(offset int64, whence int) (int64, error) {
 }
 
 func (tfi *TorrentFileInfo) waitForPiece(pieceIndex int) bool {
-	if !tfi.torrentHandle.Have_piece(pieceIndex) {
+	if !tfi.handle.Have_piece(pieceIndex) {
 		/*endPieceIndex := tfi.GetPieceIndexFromOffset(tfi.Size)
 		if (endPieceIndex - pieceIndex) <= tfi.GetPreloadBufferPieceCount()*10 {
 			return true
 		} else {*/
-		tfi.torrentHandle.Piece_priority(pieceIndex, 7)
+		tfi.handle.Piece_priority(pieceIndex, 7)
 		log.Println("[BITTORRENT]", tfi.file.Fd(), "Waiting for piece", pieceIndex)
 		for {
 			time.Sleep(100 * time.Millisecond)
-			if tfi.torrentHandle.Have_piece(pieceIndex) {
+			if tfi.handle.Have_piece(pieceIndex) {
 				log.Println("[BITTORRENT]", tfi.file.Fd(), "Piece", pieceIndex, "ready")
 				break
 			}
@@ -149,6 +143,7 @@ type TorrentInfo struct {
 	DownloadDir  string            `json:download_dir`
 	State        int               `json:"state"`
 	StateStr     string            `json:"state_str"`
+	Paused       bool              `json:"paused"`
 	Files        []TorrentFileInfo `json:"files"`
 	Size         int64             `json:"size"`
 	Pieces       int               `json:"pieces"`
@@ -159,17 +154,57 @@ type TorrentInfo struct {
 	TotalSeeds   int               `json:"total_seeds"`
 	Peers        int               `json:"peers"`
 	TotalPeers   int               `json:"total_peers"`
+
+	handle         libtorrent.Torrent_handle
+	connections    int
+	connectionChan chan int
 }
 
 func NewTorrentInfo(torrentHandle libtorrent.Torrent_handle) *TorrentInfo {
-	torrentStatus := torrentHandle.Status()
+	result := &TorrentInfo{handle: torrentHandle, connections: 0, connectionChan: make(chan int, 10)}
+	result.Refresh()
 
-	result := &TorrentInfo{}
-	result.InfoHash = fmt.Sprintf("%X", torrentStatus.GetInfo_hash().To_string())
-	result.Name = torrentStatus.GetName()
-	result.DownloadDir = torrentStatus.GetSave_path()
-	result.State = int(torrentStatus.GetState())
-	result.StateStr = func(state libtorrent.LibtorrentTorrent_statusState_t) string {
+	go func() {
+		for {
+			if result.connections == 0 {
+				if !result.Paused {
+					select {
+					case inc := <-result.connectionChan:
+						resumeTorrent(result.handle)
+						result.connections += inc
+						result.Paused = false
+					case <-time.After(time.Duration(settings.inactivityPauseTimeout) * time.Second):
+						pauseTorrent(result.handle)
+						result.Paused = true
+					}
+				} else {
+					select {
+					case inc := <-result.connectionChan:
+						resumeTorrent(result.handle)
+						result.connections += inc
+						result.Paused = false
+					case <-time.After(time.Duration(settings.inactivityRemoveTimeout) * time.Second):
+						removeTorrent(result.handle)
+						return
+					}
+				}
+			} else {
+				result.connections += <-result.connectionChan
+			}
+		}
+	}()
+
+	return result
+}
+
+func (ti *TorrentInfo) Refresh() {
+	torrentStatus := ti.handle.Status()
+
+	ti.InfoHash = fmt.Sprintf("%X", torrentStatus.GetInfo_hash().To_string())
+	ti.Name = torrentStatus.GetName()
+	ti.DownloadDir = torrentStatus.GetSave_path()
+	ti.State = int(torrentStatus.GetState())
+	ti.StateStr = func(state libtorrent.LibtorrentTorrent_statusState_t) string {
 		switch state {
 		case libtorrent.Torrent_statusQueued_for_checking:
 			return "Queued for checking"
@@ -191,34 +226,33 @@ func NewTorrentInfo(torrentHandle libtorrent.Torrent_handle) *TorrentInfo {
 			return "Unknown"
 		}
 	}(torrentStatus.GetState())
-	result.Progress = torrentStatus.GetProgress()
-	result.DownloadRate = torrentStatus.GetDownload_rate() / 1024
-	result.UploadRate = torrentStatus.GetUpload_rate() / 1024
-	result.Seeds = torrentStatus.GetNum_seeds()
-	result.TotalSeeds = torrentStatus.GetNum_complete()
-	result.Peers = torrentStatus.GetNum_peers()
-	result.TotalPeers = torrentStatus.GetNum_incomplete()
+	ti.Paused = torrentStatus.GetPaused()
+	ti.Progress = torrentStatus.GetProgress()
+	ti.DownloadRate = torrentStatus.GetDownload_rate() / 1024
+	ti.UploadRate = torrentStatus.GetUpload_rate() / 1024
+	ti.Seeds = torrentStatus.GetNum_seeds()
+	ti.TotalSeeds = torrentStatus.GetNum_complete()
+	ti.Peers = torrentStatus.GetNum_peers()
+	ti.TotalPeers = torrentStatus.GetNum_incomplete()
 
-	torrentInfo := torrentHandle.Torrent_file()
+	torrentInfo := ti.handle.Torrent_file()
 	if torrentInfo.Swigcptr() != 0 {
-		result.Files = func(torrentInfo libtorrent.Torrent_info) []TorrentFileInfo {
+		ti.Files = func(torrentInfo libtorrent.Torrent_info) []TorrentFileInfo {
 			result := []TorrentFileInfo{}
 			for i := 0; i < torrentInfo.Files().Num_files(); i++ {
 				result = append(result, TorrentFileInfo{
-					Path:          torrentInfo.Files().File_path(i),
-					Size:          torrentInfo.Files().File_size(i),
-					torrentHandle: torrentHandle,
-					offset:        torrentInfo.Files().File_offset(i),
-					pieceLength:   torrentInfo.Files().Piece_length(),
+					Path:        torrentInfo.Files().File_path(i),
+					Size:        torrentInfo.Files().File_size(i),
+					handle:      ti.handle,
+					offset:      torrentInfo.Files().File_offset(i),
+					pieceLength: torrentInfo.Files().Piece_length(),
 				})
 			}
 			return result
 		}(torrentInfo)
-		result.Size = torrentInfo.Files().Total_size()
-		result.Pieces = torrentInfo.Num_pieces()
+		ti.Size = torrentInfo.Files().Total_size()
+		ti.Pieces = torrentInfo.Num_pieces()
 	}
-
-	return result
 }
 
 func (ti *TorrentInfo) GetTorrentFileInfo(filePath string) *TorrentFileInfo {
@@ -230,48 +264,25 @@ func (ti *TorrentInfo) GetTorrentFileInfo(filePath string) *TorrentFileInfo {
 	return nil
 }
 
-type Downloader struct {
-	settings      *Settings
-	session       libtorrent.Session
-	removeChannel chan bool
-	deleteChannel chan bool
-}
+var torrentSession libtorrent.Session
+var torrentInfos []TorrentInfo = make([]TorrentInfo, 0)
 
-func NewDownloader(settings *Settings) *Downloader {
-	return &Downloader{settings: settings, removeChannel: make(chan bool), deleteChannel: make(chan bool)}
-}
+var removeChannel chan bool = make(chan bool, 1)
+var deleteChannel chan bool = make(chan bool, 1)
 
-func (d *Downloader) GetTorrentInfos() []*TorrentInfo {
-	result := []*TorrentInfo{}
-	for i := 0; i < int(d.session.Get_torrents().Size()); i++ {
-		result = append(result, NewTorrentInfo(d.session.Get_torrents().Get(i)))
-	}
-	return result
-}
-
-func (d *Downloader) GetTorrentInfo(infoHash string) *TorrentInfo {
-	for i := 0; i < int(d.session.Get_torrents().Size()); i++ {
-		torrentHandle := d.session.Get_torrents().Get(i)
-		if fmt.Sprintf("%X", torrentHandle.Info_hash().To_string()) == infoHash {
-			return NewTorrentInfo(torrentHandle)
-		}
-	}
-	return nil
-}
-
-func (d *Downloader) Start() {
+func bitTorrentStart() {
 	log.Println("[BITTORRENT] Starting")
 
 	fingerprint := libtorrent.NewFingerprint("LT", libtorrent.LIBTORRENT_VERSION_MAJOR, libtorrent.LIBTORRENT_VERSION_MINOR, 0, 0)
-	portRange := libtorrent.NewStd_pair_int_int(d.settings.bitTorrent.port, d.settings.bitTorrent.port)
+	portRange := libtorrent.NewStd_pair_int_int(settings.bitTorrentPort, settings.bitTorrentPort)
 	listenInterface := "0.0.0.0"
 	sessionFlags := int(libtorrent.SessionAdd_default_plugins)
 	alertMask := int(libtorrent.AlertError_notification | libtorrent.AlertStorage_notification | libtorrent.AlertStatus_notification)
 
-	d.session = libtorrent.NewSession(fingerprint, portRange, listenInterface, sessionFlags, alertMask)
-	go d.alertPump()
+	torrentSession = libtorrent.NewSession(fingerprint, portRange, listenInterface, sessionFlags, alertMask)
+	go alertPump()
 
-	sessionSettings := d.session.Settings()
+	sessionSettings := torrentSession.Settings()
 	sessionSettings.SetAnnounce_to_all_tiers(true)
 	sessionSettings.SetAnnounce_to_all_trackers(true)
 	sessionSettings.SetConnection_speed(100)
@@ -280,86 +291,130 @@ func (d *Downloader) Start() {
 	sessionSettings.SetRequest_timeout(5)
 	sessionSettings.SetTorrent_connect_boost(100)
 
-	if d.settings.bitTorrent.maxDownloadRate > 0 {
-		sessionSettings.SetDownload_rate_limit(d.settings.bitTorrent.maxDownloadRate * 1024)
+	if settings.maxDownloadRate > 0 {
+		sessionSettings.SetDownload_rate_limit(settings.maxDownloadRate * 1024)
 	}
-	if d.settings.bitTorrent.maxUploadRate > 0 {
-		sessionSettings.SetUpload_rate_limit(d.settings.bitTorrent.maxUploadRate * 1024)
+	if settings.maxUploadRate > 0 {
+		sessionSettings.SetUpload_rate_limit(settings.maxUploadRate * 1024)
 	}
 
-	d.session.Set_settings(sessionSettings)
+	torrentSession.Set_settings(sessionSettings)
 
 	encryptionSettings := libtorrent.NewPe_settings()
 	encryptionSettings.SetOut_enc_policy(byte(libtorrent.Pe_settingsForced))
 	encryptionSettings.SetIn_enc_policy(byte(libtorrent.Pe_settingsForced))
 	encryptionSettings.SetAllowed_enc_level(byte(libtorrent.Pe_settingsBoth))
 	encryptionSettings.SetPrefer_rc4(true)
-	d.session.Set_pe_settings(encryptionSettings)
+	torrentSession.Set_pe_settings(encryptionSettings)
 
-	d.session.Start_dht()
-	d.session.Start_lsd()
+	torrentSession.Start_dht()
+	torrentSession.Start_lsd()
 
-	if d.settings.bitTorrent.uPNPNatPMPEnabled {
+	if settings.uPNPNatPMPEnabled {
 		log.Println("[BITTORRENT] Starting UPNP/NATPMP")
-		d.session.Start_upnp()
-		d.session.Start_natpmp()
+		torrentSession.Start_upnp()
+		torrentSession.Start_natpmp()
 	}
 }
 
-func (d *Downloader) Stop() {
-	for i := 0; i < int(d.session.Get_torrents().Size()); i++ {
-		d.removeTorrent(d.session.Get_torrents().Get(i))
+func bitTorrentStop() {
+	for i := 0; i < int(torrentSession.Get_torrents().Size()); i++ {
+		removeTorrent(torrentSession.Get_torrents().Get(i))
 	}
 
-	if d.settings.bitTorrent.uPNPNatPMPEnabled {
+	if settings.uPNPNatPMPEnabled {
 		log.Println("[BITTORRENT] Stopping UPNP/NATPMP")
-		d.session.Stop_natpmp()
-		d.session.Stop_upnp()
+		torrentSession.Stop_natpmp()
+		torrentSession.Stop_upnp()
 	}
 
-	d.session.Stop_lsd()
-	d.session.Stop_dht()
+	torrentSession.Stop_lsd()
+	torrentSession.Stop_dht()
 
 	log.Println("[BITTORRENT] Stopping")
 }
 
-func (d *Downloader) AddTorrent(magnetLink string, downloadDir string) {
+func addTorrent(magnetLink string, downloadDir string) {
 	addTorrentParams := libtorrent.NewAdd_torrent_params()
 	addTorrentParams.SetUrl(magnetLink)
 	addTorrentParams.SetSave_path(downloadDir)
 	addTorrentParams.SetStorage_mode(libtorrent.Storage_mode_sparse)
 	addTorrentParams.SetFlags(uint64(libtorrent.Add_torrent_paramsFlag_sequential_download))
 
-	d.session.Async_add_torrent(addTorrentParams)
+	torrentSession.Async_add_torrent(addTorrentParams)
 }
 
-func (d *Downloader) removeTorrent(torrentHandle libtorrent.Torrent_handle) {
+func removeTorrent(torrentHandle libtorrent.Torrent_handle) {
 	removeFlags := 0
-	if !d.settings.bitTorrent.keepFiles {
+	if !settings.keepFiles {
 		removeFlags = int(libtorrent.SessionDelete_files)
 	}
-	d.session.Remove_torrent(torrentHandle, removeFlags)
-	<-d.removeChannel
+	torrentSession.Remove_torrent(torrentHandle, removeFlags)
+	<-removeChannel
 
 	if removeFlags != 0 {
-		<-d.deleteChannel
+		<-deleteChannel
 	}
 }
 
-func (d *Downloader) alertPump() {
+func pauseTorrent(torrentHandle libtorrent.Torrent_handle) {
+	torrentHandle.Pause()
+}
+
+func resumeTorrent(torrentHandle libtorrent.Torrent_handle) {
+	torrentHandle.Resume()
+}
+
+func addTorrentInfo(torrentHandle libtorrent.Torrent_handle) {
+	torrentInfos = append(torrentInfos, *NewTorrentInfo(torrentHandle))
+}
+
+func removeTorrentInfo(torrentHandle libtorrent.Torrent_handle) {
+	for i, torrentInfo := range torrentInfos {
+		if torrentInfo.handle.Equal(torrentHandle) {
+			torrentInfos = append(torrentInfos[:i], torrentInfos[i+1:]...)
+			removeChannel <- true
+			break
+		}
+	}
+}
+
+func getTorrentInfos() *[]TorrentInfo {
+	for i, _ := range torrentInfos {
+		torrentInfos[i].Refresh()
+	}
+	return &torrentInfos
+}
+
+func getTorrentInfo(infoHash string) *TorrentInfo {
+	for i, _ := range torrentInfos {
+		if torrentInfos[i].InfoHash == infoHash {
+			torrentInfos[i].Refresh()
+			return &torrentInfos[i]
+		}
+	}
+	return nil
+}
+
+func alertPump() {
 	for {
-		if d.session.Wait_for_alert(libtorrent.Seconds(1)).Swigcptr() != 0 {
-			alert := d.session.Pop_alert()
+		if torrentSession.Wait_for_alert(libtorrent.Seconds(1)).Swigcptr() != 0 {
+			alert := torrentSession.Pop_alert()
 			switch alert.Xtype() {
+			case libtorrent.Torrent_added_alertAlert_type:
+				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
+				torrentAddedAlert := libtorrent.SwigcptrTorrent_added_alert(alert.Swigcptr())
+				addTorrentInfo(torrentAddedAlert.GetHandle())
 			case libtorrent.Torrent_removed_alertAlert_type:
 				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
-				d.removeChannel <- true
+				torrentRemovedAlert := libtorrent.SwigcptrTorrent_removed_alert(alert.Swigcptr())
+				removeTorrentInfo(torrentRemovedAlert.GetHandle())
 			case libtorrent.Torrent_deleted_alertAlert_type:
 				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
-				d.deleteChannel <- true
+				deleteChannel <- true
 			case libtorrent.Torrent_delete_failed_alertAlert_type:
 				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
-				d.deleteChannel <- false
+				deleteChannel <- false
 			case libtorrent.Add_torrent_alertAlert_type:
 				// Ignore
 			case libtorrent.Cache_flushed_alertAlert_type:

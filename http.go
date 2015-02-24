@@ -49,7 +49,11 @@ func add(w http.ResponseWriter, r *http.Request) {
 
 	if magnetLink := r.URL.Query().Get("magnet"); magnetLink != "" {
 		addTorrent(magnetLink, downloadDir)
-		w.WriteHeader(http.StatusOK)
+		type AddResponse struct {
+			magnetLink  string `json:"magnet_link"`
+			downloadDir string `json:"download_dir"`
+		}
+		routes.ServeJson(w, AddResponse{magnetLink: magnetLink, downloadDir: downloadDir})
 	} else {
 		http.Error(w, "Missing Magnet link", http.StatusBadRequest)
 	}

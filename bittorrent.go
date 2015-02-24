@@ -140,7 +140,7 @@ func (tfi *TorrentFileInfo) waitForPiece(pieceIndex int) bool {
 type TorrentInfo struct {
 	InfoHash     string            `json:"info_hash"`
 	Name         string            `json:"name"`
-	DownloadDir  string            `json:download_dir`
+	DownloadDir  string            `json:"download_dir"`
 	State        int               `json:"state"`
 	StateStr     string            `json:"state_str"`
 	Paused       bool              `json:"paused"`

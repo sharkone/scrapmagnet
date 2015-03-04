@@ -70,7 +70,6 @@ func files(w http.ResponseWriter, r *http.Request) {
 				if torrentFileInfo := torrentInfo.GetTorrentFileInfo(filePath); torrentFileInfo != nil {
 					if torrentFileInfo.Open(torrentInfo.DownloadDir) {
 						defer torrentFileInfo.Close()
-						log.Println("[HTTP] Serving:", filePath)
 						http.ServeContent(w, r, filePath, time.Time{}, torrentFileInfo)
 					} else {
 						http.Error(w, "Failed to open file", http.StatusInternalServerError)

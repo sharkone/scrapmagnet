@@ -88,15 +88,10 @@ func (tfi *TorrentFileInfo) Read(data []byte) (int, error) {
 
 		currentPosition, _ := tfi.file.Seek(0, os.SEEK_CUR)
 		pieceIndex := tfi.GetPieceIndexFromOffset(currentPosition + readSize)
+		tfi.waitForPiece(pieceIndex)
 
-		//log.Println("[BITTORRENT]", tfi.file.Fd(), "Read from piece:", pieceIndex, readSize, currentPosition)
-		/*if*/ tfi.waitForPiece(pieceIndex) /*{
-			log.Println("[BITTORRENT]", tfi.file.Fd(), "Virtual read successful from piece:", pieceIndex)
-			return totalRead, nil
-		} else {*/
 		tmpData := make([]byte, readSize)
 		read, err := tfi.file.Read(tmpData)
-		//log.Println("[BITTORRENT]", tfi.file.Fd(), "Read successful from piece:", pieceIndex, read, currentPosition)
 		if err != nil {
 			totalRead += read
 			log.Println("[BITTORRENT]", tfi.file.Fd(), "Read failed!", read, readSize, currentPosition, err)
@@ -106,7 +101,6 @@ func (tfi *TorrentFileInfo) Read(data []byte) (int, error) {
 		copy(data[totalRead:], tmpData[:read])
 		totalRead += read
 		size -= read
-		/*}*/
 	}
 
 	return totalRead, nil
@@ -126,36 +120,25 @@ func (tfi *TorrentFileInfo) Seek(offset int64, whence int) (int64, error) {
 	}
 
 	pieceIndex := tfi.GetPieceIndexFromOffset(newPosition)
-	//log.Println("[BITTORRENT]", tfi.file.Fd(), "Seek to", newPosition, "piece:", pieceIndex)
-	/*if*/ tfi.waitForPiece(pieceIndex) /*{
-		log.Println("[BITTORRENT]", tfi.file.Fd(), "Virtual seek successful to", newPosition, "piece:", pieceIndex)
-		return newPosition, nil
-	} else {*/
+	tfi.waitForPiece(pieceIndex)
+
 	ret, err := tfi.file.Seek(offset, whence)
 	if err != nil || ret != newPosition {
 		log.Println("[BITTORRENT]", tfi.file.Fd(), "Seek failed", ret, newPosition, err)
 	}
-	//log.Println("[BITTORRENT]", tfi.file.Fd(), "Seek successful to", newPosition, "piece:", pieceIndex)
+
 	return ret, err
-	/*}*/
 }
 
 func (tfi *TorrentFileInfo) waitForPiece(pieceIndex int) bool {
 	if !tfi.handle.Have_piece(pieceIndex) {
-		/*endPieceIndex := tfi.GetPieceIndexFromOffset(tfi.Size)
-		if (endPieceIndex - pieceIndex) <= tfi.GetPreloadBufferPieceCount()*10 {
-			return true
-		} else {*/
-		tfi.handle.Piece_priority(pieceIndex, 7)
-		log.Println("[BITTORRENT]", tfi.file.Fd(), "Waiting for piece", pieceIndex)
+		tfi.handle.Set_piece_deadline(pieceIndex, 60000, 0)
 		for {
 			time.Sleep(100 * time.Millisecond)
 			if tfi.handle.Have_piece(pieceIndex) {
-				log.Println("[BITTORRENT]", tfi.file.Fd(), "Piece", pieceIndex, "ready")
 				break
 			}
 		}
-		/*}*/
 	}
 
 	return false

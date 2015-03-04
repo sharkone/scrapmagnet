@@ -12,24 +12,48 @@ import (
 )
 
 type TorrentFileInfo struct {
-	Path string `json:"path"`
-	Size int64  `json:"size"`
+	Path             string `json:"path"`
+	Size             int64  `json:"size"`
+	CompletePieces   int    `json:"complete_pieces"`
+	ContiguousPieces int    `json:"contiguous_pieces"`
+	TotalPieces      int    `json:"total_pieces"`
 
-	handle      libtorrent.Torrent_handle
-	pieceLength int
-	offset      int64
-	file        *os.File
+	handle     libtorrent.Torrent_handle
+	offset     int64
+	startPiece int
+	endPiece   int
+	file       *os.File
+}
+
+func NewTorrentFileInfo(path string, size int64, offset int64, handle libtorrent.Torrent_handle) *TorrentFileInfo {
+	result := &TorrentFileInfo{}
+	result.Path = path
+	result.Size = size
+	result.offset = offset
+	result.handle = handle
+	result.startPiece = result.GetPieceIndexFromOffset(0)
+	result.endPiece = result.GetPieceIndexFromOffset(size)
+	result.CompletePieces = result.GetCompletePieces(false)
+	result.ContiguousPieces = result.GetCompletePieces(true)
+	result.TotalPieces = 1 + result.endPiece - result.startPiece
+	return result
 }
 
 func (tfi *TorrentFileInfo) GetPieceIndexFromOffset(offset int64) int {
-	pieceIndex := int((tfi.offset + offset) / int64(tfi.pieceLength))
+	pieceIndex := int((tfi.offset + offset) / int64(tfi.handle.Torrent_file().Piece_length()))
 	return pieceIndex
 }
 
-func (tfi *TorrentFileInfo) GetTotalPieceCount() int {
-	startPieceIndex := tfi.GetPieceIndexFromOffset(0)
-	endPieceIndex := tfi.GetPieceIndexFromOffset(tfi.Size)
-	return int(math.Max(float64(1), float64(endPieceIndex-startPieceIndex)))
+func (tfi *TorrentFileInfo) GetCompletePieces(contiguous bool) int {
+	completePieces := 0
+	for i := tfi.startPiece; i != (tfi.endPiece + 1); i++ {
+		if tfi.handle.Have_piece(i) {
+			completePieces += 1
+		} else if contiguous {
+			return completePieces
+		}
+	}
+	return completePieces
 }
 
 func (tfi *TorrentFileInfo) Open(downloadDir string) bool {
@@ -60,7 +84,7 @@ func (tfi *TorrentFileInfo) Read(data []byte) (int, error) {
 	size := len(data)
 
 	for size > 0 {
-		readSize := int64(math.Min(float64(size), float64(tfi.pieceLength)))
+		readSize := int64(math.Min(float64(size), float64(tfi.handle.Torrent_file().Piece_length())))
 
 		currentPosition, _ := tfi.file.Seek(0, os.SEEK_CUR)
 		pieceIndex := tfi.GetPieceIndexFromOffset(currentPosition + readSize)
@@ -138,22 +162,22 @@ func (tfi *TorrentFileInfo) waitForPiece(pieceIndex int) bool {
 }
 
 type TorrentInfo struct {
-	InfoHash     string            `json:"info_hash"`
-	Name         string            `json:"name"`
-	DownloadDir  string            `json:"download_dir"`
-	State        int               `json:"state"`
-	StateStr     string            `json:"state_str"`
-	Paused       bool              `json:"paused"`
-	Files        []TorrentFileInfo `json:"files"`
-	Size         int64             `json:"size"`
-	Pieces       int               `json:"pieces"`
-	Progress     float32           `json:"progress"`
-	DownloadRate int               `json:"download_rate"`
-	UploadRate   int               `json:"upload_rate"`
-	Seeds        int               `json:"seeds"`
-	TotalSeeds   int               `json:"total_seeds"`
-	Peers        int               `json:"peers"`
-	TotalPeers   int               `json:"total_peers"`
+	InfoHash     string             `json:"info_hash"`
+	Name         string             `json:"name"`
+	DownloadDir  string             `json:"download_dir"`
+	State        int                `json:"state"`
+	StateStr     string             `json:"state_str"`
+	Paused       bool               `json:"paused"`
+	Files        []*TorrentFileInfo `json:"files"`
+	Size         int64              `json:"size"`
+	Pieces       int                `json:"pieces"`
+	Progress     float32            `json:"progress"`
+	DownloadRate int                `json:"download_rate"`
+	UploadRate   int                `json:"upload_rate"`
+	Seeds        int                `json:"seeds"`
+	TotalSeeds   int                `json:"total_seeds"`
+	Peers        int                `json:"peers"`
+	TotalPeers   int                `json:"total_peers"`
 
 	handle         libtorrent.Torrent_handle
 	connections    int
@@ -237,16 +261,10 @@ func (ti *TorrentInfo) Refresh() {
 
 	torrentInfo := ti.handle.Torrent_file()
 	if torrentInfo.Swigcptr() != 0 {
-		ti.Files = func(torrentInfo libtorrent.Torrent_info) []TorrentFileInfo {
-			result := []TorrentFileInfo{}
+		ti.Files = func(torrentInfo libtorrent.Torrent_info) []*TorrentFileInfo {
+			result := []*TorrentFileInfo{}
 			for i := 0; i < torrentInfo.Files().Num_files(); i++ {
-				result = append(result, TorrentFileInfo{
-					Path:        torrentInfo.Files().File_path(i),
-					Size:        torrentInfo.Files().File_size(i),
-					handle:      ti.handle,
-					offset:      torrentInfo.Files().File_offset(i),
-					pieceLength: torrentInfo.Files().Piece_length(),
-				})
+				result = append(result, NewTorrentFileInfo(torrentInfo.Files().File_path(i), torrentInfo.Files().File_size(i), torrentInfo.Files().File_offset(i), ti.handle))
 			}
 			return result
 		}(torrentInfo)
@@ -258,7 +276,7 @@ func (ti *TorrentInfo) Refresh() {
 func (ti *TorrentInfo) GetTorrentFileInfo(filePath string) *TorrentFileInfo {
 	for _, torrentFileInfo := range ti.Files {
 		if torrentFileInfo.Path == filePath {
-			return &torrentFileInfo
+			return torrentFileInfo
 		}
 	}
 	return nil
@@ -290,15 +308,27 @@ func bitTorrentStart() {
 	sessionSettings.SetRate_limit_ip_overhead(true)
 	sessionSettings.SetRequest_timeout(5)
 	sessionSettings.SetTorrent_connect_boost(100)
-
 	if settings.maxDownloadRate > 0 {
 		sessionSettings.SetDownload_rate_limit(settings.maxDownloadRate * 1024)
 	}
 	if settings.maxUploadRate > 0 {
 		sessionSettings.SetUpload_rate_limit(settings.maxUploadRate * 1024)
 	}
-
 	torrentSession.Set_settings(sessionSettings)
+
+	proxySettings := libtorrent.NewProxy_settings()
+	if settings.proxyType == "SOCKS5" {
+		proxySettings.SetHostname(settings.proxyHost)
+		proxySettings.SetPort(uint16(settings.proxyPort))
+		if settings.proxyUser != "" {
+			proxySettings.SetXtype(byte(libtorrent.Proxy_settingsSocks5_pw))
+			proxySettings.SetUsername(settings.proxyUser)
+			proxySettings.SetPassword(settings.proxyPassword)
+		} else {
+			proxySettings.SetXtype(byte(libtorrent.Proxy_settingsSocks5))
+		}
+	}
+	torrentSession.Set_proxy(proxySettings)
 
 	encryptionSettings := libtorrent.NewPe_settings()
 	encryptionSettings.SetOut_enc_policy(byte(libtorrent.Pe_settingsForced))

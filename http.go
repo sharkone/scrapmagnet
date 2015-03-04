@@ -65,14 +65,13 @@ func files(w http.ResponseWriter, r *http.Request) {
 
 	if infoHash != "" {
 		if torrentInfo := getTorrentInfo(infoHash); torrentInfo != nil {
+			torrentInfo.connectionChan <- 1
 			if filePath != "" {
 				if torrentFileInfo := torrentInfo.GetTorrentFileInfo(filePath); torrentFileInfo != nil {
 					if torrentFileInfo.Open(torrentInfo.DownloadDir) {
-						torrentInfo.connectionChan <- 1
 						defer torrentFileInfo.Close()
 						log.Println("[HTTP] Serving:", filePath)
 						http.ServeContent(w, r, filePath, time.Time{}, torrentFileInfo)
-						torrentInfo.connectionChan <- -1
 					} else {
 						http.Error(w, "Failed to open file", http.StatusInternalServerError)
 					}
@@ -82,6 +81,7 @@ func files(w http.ResponseWriter, r *http.Request) {
 			} else {
 				routes.ServeJson(w, torrentInfo)
 			}
+			torrentInfo.connectionChan <- -1
 		} else {
 			http.Error(w, "Invalid info hash", http.StatusNotFound)
 		}

@@ -284,6 +284,7 @@ func bitTorrentStart() {
 	go alertPump()
 
 	sessionSettings := torrentSession.Settings()
+	sessionSettings.SetSsl_listen(0)
 	sessionSettings.SetAnnounce_to_all_tiers(true)
 	sessionSettings.SetAnnounce_to_all_trackers(true)
 	sessionSettings.SetConnection_speed(100)

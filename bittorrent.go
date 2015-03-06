@@ -12,12 +12,11 @@ import (
 )
 
 type TorrentFileInfo struct {
-	Path             string   `json:"path"`
-	Size             int64    `json:"size"`
-	CompletePieces   int      `json:"complete_pieces"`
-	ContiguousPieces int      `json:"contiguous_pieces"`
-	TotalPieces      int      `json:"total_pieces"`
-	PieceMap         []string `json:"piece_map"`
+	Path           string   `json:"path"`
+	Size           int64    `json:"size"`
+	CompletePieces int      `json:"complete_pieces"`
+	TotalPieces    int      `json:"total_pieces"`
+	PieceMap       []string `json:"piece_map"`
 
 	handle     libtorrent.Torrent_handle
 	offset     int64
@@ -34,8 +33,7 @@ func NewTorrentFileInfo(path string, size int64, offset int64, handle libtorrent
 	result.handle = handle
 	result.startPiece = result.GetPieceIndexFromOffset(0)
 	result.endPiece = result.GetPieceIndexFromOffset(size)
-	result.CompletePieces = result.GetCompletePieces(false)
-	result.ContiguousPieces = result.GetCompletePieces(true)
+	result.CompletePieces = result.GetCompletePieces()
 	result.TotalPieces = 1 + result.endPiece - result.startPiece
 	result.PieceMap = result.GetPieceMap()
 	return result
@@ -46,13 +44,11 @@ func (tfi *TorrentFileInfo) GetPieceIndexFromOffset(offset int64) int {
 	return pieceIndex
 }
 
-func (tfi *TorrentFileInfo) GetCompletePieces(contiguous bool) int {
+func (tfi *TorrentFileInfo) GetCompletePieces() int {
 	completePieces := 0
 	for i := tfi.startPiece; i <= tfi.endPiece; i++ {
 		if tfi.handle.Have_piece(i) {
 			completePieces += 1
-		} else if contiguous {
-			return completePieces
 		}
 	}
 	return completePieces
@@ -429,16 +425,6 @@ func removeTorrentInfo(torrentHandle libtorrent.Torrent_handle) {
 	}
 }
 
-func metadataReceived(torrentHandle libtorrent.Torrent_handle) {
-	torrentInfo := torrentHandle.Torrent_file()
-	for i := 0; i < torrentInfo.Files().Num_files(); i++ {
-		torrentFileInfo := NewTorrentFileInfo(torrentInfo.Files().File_path(i), torrentInfo.Files().File_size(i), torrentInfo.Files().File_offset(i), torrentHandle)
-		for j := 0; j <= torrentFileInfo.getLookAhead()*4 && j <= torrentFileInfo.endPiece; j++ {
-			torrentFileInfo.handle.Set_piece_deadline(j, 3000+j*1000, 0)
-		}
-	}
-}
-
 func getTorrentInfos() *[]TorrentInfo {
 	for i, _ := range torrentInfos {
 		torrentInfos[i].Refresh()
@@ -475,10 +461,6 @@ func alertPump() {
 			case libtorrent.Torrent_delete_failed_alertAlert_type:
 				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
 				deleteChannel <- false
-			case libtorrent.Metadata_received_alertAlert_type:
-				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
-				metadataReceivedAlert := libtorrent.SwigcptrMetadata_received_alert(alert.Swigcptr())
-				metadataReceived(metadataReceivedAlert.GetHandle())
 			case libtorrent.Add_torrent_alertAlert_type:
 				// Ignore
 			case libtorrent.Cache_flushed_alertAlert_type:

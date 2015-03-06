@@ -12,11 +12,12 @@ import (
 )
 
 type TorrentFileInfo struct {
-	Path             string `json:"path"`
-	Size             int64  `json:"size"`
-	CompletePieces   int    `json:"complete_pieces"`
-	ContiguousPieces int    `json:"contiguous_pieces"`
-	TotalPieces      int    `json:"total_pieces"`
+	Path             string   `json:"path"`
+	Size             int64    `json:"size"`
+	CompletePieces   int      `json:"complete_pieces"`
+	ContiguousPieces int      `json:"contiguous_pieces"`
+	TotalPieces      int      `json:"total_pieces"`
+	PieceMap         []string `json:"piece_map"`
 
 	handle     libtorrent.Torrent_handle
 	offset     int64
@@ -36,6 +37,7 @@ func NewTorrentFileInfo(path string, size int64, offset int64, handle libtorrent
 	result.CompletePieces = result.GetCompletePieces(false)
 	result.ContiguousPieces = result.GetCompletePieces(true)
 	result.TotalPieces = 1 + result.endPiece - result.startPiece
+	result.PieceMap = result.GetPieceMap()
 	return result
 }
 
@@ -46,7 +48,7 @@ func (tfi *TorrentFileInfo) GetPieceIndexFromOffset(offset int64) int {
 
 func (tfi *TorrentFileInfo) GetCompletePieces(contiguous bool) int {
 	completePieces := 0
-	for i := tfi.startPiece; i != (tfi.endPiece + 1); i++ {
+	for i := tfi.startPiece; i <= tfi.endPiece; i++ {
 		if tfi.handle.Have_piece(i) {
 			completePieces += 1
 		} else if contiguous {
@@ -54,6 +56,23 @@ func (tfi *TorrentFileInfo) GetCompletePieces(contiguous bool) int {
 		}
 	}
 	return completePieces
+}
+
+func (tfi *TorrentFileInfo) GetPieceMap() []string {
+	totalRows := tfi.TotalPieces / 100
+	if (tfi.TotalPieces % 100) != 0 {
+		totalRows++
+	}
+
+	result := make([]string, totalRows)
+	for i := tfi.startPiece; i <= tfi.endPiece; i++ {
+		if tfi.handle.Have_piece(i) {
+			result[(i-tfi.startPiece)/100] += "*"
+		} else {
+			result[(i-tfi.startPiece)/100] += fmt.Sprintf("%v", tfi.handle.Piece_priority(i))
+		}
+	}
+	return result
 }
 
 func (tfi *TorrentFileInfo) Open(downloadDir string) bool {
@@ -88,7 +107,7 @@ func (tfi *TorrentFileInfo) Read(data []byte) (int, error) {
 
 		currentPosition, _ := tfi.file.Seek(0, os.SEEK_CUR)
 		pieceIndex := tfi.GetPieceIndexFromOffset(currentPosition + readSize)
-		tfi.waitForPiece(pieceIndex)
+		tfi.waitForPiece(pieceIndex, false)
 
 		tmpData := make([]byte, readSize)
 		read, err := tfi.file.Read(tmpData)
@@ -120,7 +139,7 @@ func (tfi *TorrentFileInfo) Seek(offset int64, whence int) (int64, error) {
 	}
 
 	pieceIndex := tfi.GetPieceIndexFromOffset(newPosition)
-	tfi.waitForPiece(pieceIndex)
+	tfi.waitForPiece(pieceIndex, true)
 
 	ret, err := tfi.file.Seek(offset, whence)
 	if err != nil || ret != newPosition {
@@ -130,9 +149,22 @@ func (tfi *TorrentFileInfo) Seek(offset int64, whence int) (int64, error) {
 	return ret, err
 }
 
-func (tfi *TorrentFileInfo) waitForPiece(pieceIndex int) bool {
+func (tfi *TorrentFileInfo) waitForPiece(pieceIndex int, timeCritical bool) bool {
 	if !tfi.handle.Have_piece(pieceIndex) {
-		tfi.handle.Set_piece_deadline(pieceIndex, 60000, 0)
+		if timeCritical {
+			tfi.handle.Clear_piece_deadlines()
+			for i := 0; i <= tfi.getLookAhead() && (i+pieceIndex) <= tfi.endPiece; i++ {
+				tfi.handle.Set_piece_deadline(pieceIndex+i, 3000+i*1000, 0)
+			}
+		} else {
+			for i := tfi.startPiece; i < tfi.endPiece; i++ {
+				tfi.handle.Piece_priority(i, 1)
+			}
+			for i := 0; i <= tfi.getLookAhead()*4 && (i+pieceIndex) <= tfi.endPiece; i++ {
+				tfi.handle.Piece_priority(pieceIndex+i, 7)
+			}
+		}
+
 		for {
 			time.Sleep(100 * time.Millisecond)
 			if tfi.handle.Have_piece(pieceIndex) {
@@ -142,6 +174,10 @@ func (tfi *TorrentFileInfo) waitForPiece(pieceIndex int) bool {
 	}
 
 	return false
+}
+
+func (tfi *TorrentFileInfo) getLookAhead() int {
+	return int(float32(tfi.TotalPieces) * 0.005)
 }
 
 type TorrentInfo struct {
@@ -353,7 +389,7 @@ func addTorrent(magnetLink string, downloadDir string) {
 	addTorrentParams.SetUrl(magnetLink)
 	addTorrentParams.SetSave_path(downloadDir)
 	addTorrentParams.SetStorage_mode(libtorrent.Storage_mode_sparse)
-	addTorrentParams.SetFlags(uint64(libtorrent.Add_torrent_paramsFlag_sequential_download))
+	addTorrentParams.SetFlags(0)
 
 	torrentSession.Async_add_torrent(addTorrentParams)
 }
@@ -389,6 +425,16 @@ func removeTorrentInfo(torrentHandle libtorrent.Torrent_handle) {
 			torrentInfos = append(torrentInfos[:i], torrentInfos[i+1:]...)
 			removeChannel <- true
 			break
+		}
+	}
+}
+
+func metadataReceived(torrentHandle libtorrent.Torrent_handle) {
+	torrentInfo := torrentHandle.Torrent_file()
+	for i := 0; i < torrentInfo.Files().Num_files(); i++ {
+		torrentFileInfo := NewTorrentFileInfo(torrentInfo.Files().File_path(i), torrentInfo.Files().File_size(i), torrentInfo.Files().File_offset(i), torrentHandle)
+		for j := 0; j <= torrentFileInfo.getLookAhead()*4 && j <= torrentFileInfo.endPiece; j++ {
+			torrentFileInfo.handle.Set_piece_deadline(j, 3000+j*1000, 0)
 		}
 	}
 }
@@ -429,6 +475,10 @@ func alertPump() {
 			case libtorrent.Torrent_delete_failed_alertAlert_type:
 				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
 				deleteChannel <- false
+			case libtorrent.Metadata_received_alertAlert_type:
+				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
+				metadataReceivedAlert := libtorrent.SwigcptrMetadata_received_alert(alert.Swigcptr())
+				metadataReceived(metadataReceivedAlert.GetHandle())
 			case libtorrent.Add_torrent_alertAlert_type:
 				// Ignore
 			case libtorrent.Cache_flushed_alertAlert_type:

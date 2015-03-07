@@ -1,19 +1,31 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"mime"
 	"net/http"
-	"strconv"
 	"time"
 
-	"github.com/sharkone/routes"
-	"github.com/stretchr/graceful"
+	"github.com/drone/routes"
+	"github.com/zenazn/goji/graceful"
 )
 
-var httpServer *graceful.Server
+var httpInstance *Http = nil
 
-func httpStart() {
+type Http struct {
+	settings   *Settings
+	bitTorrent *BitTorrent
+	server     *graceful.Server
+}
+
+func NewHttp(settings *Settings, bitTorrent *BitTorrent) *Http {
+	return &Http{settings: settings, bitTorrent: bitTorrent}
+}
+
+func (h *Http) Start() {
+	httpInstance = h
+
 	mime.AddExtensionType(".avi", "video/avi")
 	mime.AddExtensionType(".mkv", "video/x-matroska")
 	mime.AddExtensionType(".mp4", "video/mp4")
@@ -25,19 +37,11 @@ func httpStart() {
 	mux.Get("/files/:infohash/:filepath(.+)", files)
 	mux.Get("/shutdown", shutdown)
 
-	httpServer := &graceful.Server{
-		Timeout: 500 * time.Millisecond,
-		Server: &http.Server{
-			Addr:    ":" + strconv.Itoa(settings.httpPort),
-			Handler: mux,
-		},
-	}
-
-	log.Println("[HTTP] Listening on port", settings.httpPort)
-	httpServer.ListenAndServe()
+	log.Println("[HTTP] Listening on port", h.settings.httpPort)
+	graceful.ListenAndServe(fmt.Sprintf("0.0.0.0:%v", h.settings.httpPort), mux)
 }
 
-func httpStop() {
+func (h *Http) Stop() {
 	log.Println("[HTTP] Stopping")
 }
 
@@ -48,7 +52,7 @@ func add(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if magnetLink := r.URL.Query().Get("magnet"); magnetLink != "" {
-		addTorrent(magnetLink, downloadDir)
+		httpInstance.bitTorrent.AddTorrent(magnetLink, downloadDir)
 		type AddResponse struct {
 			magnetLink  string `json:"magnet_link"`
 			downloadDir string `json:"download_dir"`
@@ -59,13 +63,19 @@ func add(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func shutdown(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	graceful.Shutdown()
+}
+
 func files(w http.ResponseWriter, r *http.Request) {
 	infoHash := r.URL.Query().Get(":infohash")
 	filePath := r.URL.Query().Get(":filepath")
 
 	if infoHash != "" {
-		if torrentInfo := getTorrentInfo(infoHash); torrentInfo != nil {
-			torrentInfo.connectionChan <- 1
+		if torrentInfo := httpInstance.bitTorrent.GetTorrentInfo(infoHash); torrentInfo != nil {
+			httpInstance.bitTorrent.AddConnection(infoHash)
+			defer httpInstance.bitTorrent.RemoveConnection(infoHash)
 			if filePath != "" {
 				if torrentFileInfo := torrentInfo.GetTorrentFileInfo(filePath); torrentFileInfo != nil {
 					if torrentFileInfo.Open(torrentInfo.DownloadDir) {
@@ -80,16 +90,10 @@ func files(w http.ResponseWriter, r *http.Request) {
 			} else {
 				routes.ServeJson(w, torrentInfo)
 			}
-			torrentInfo.connectionChan <- -1
 		} else {
 			http.Error(w, "Invalid info hash", http.StatusNotFound)
 		}
 	} else {
-		routes.ServeJson(w, getTorrentInfos())
+		routes.ServeJson(w, httpInstance.bitTorrent.GetTorrentInfos())
 	}
-}
-
-func shutdown(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	httpServer.Stop(500 * time.Millisecond)
 }

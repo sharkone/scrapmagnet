@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
 )
 
@@ -26,28 +25,8 @@ type Settings struct {
 	proxyPassword           string
 }
 
-type NetWriter struct {
-	network string
-	address string
-}
-
-func NewNetwriter(network string, address string) *NetWriter {
-	return &NetWriter{network: network, address: address}
-}
-
-func (w *NetWriter) Write(p []byte) (int, error) {
-	if conn, err := net.Dial(w.network, w.address); err != nil {
-		return 0, err
-	} else {
-		defer conn.Close()
-		return conn.Write(p)
-	}
-}
-
-var settings Settings
-
 func main() {
-	settings = Settings{}
+	settings := Settings{}
 	flag.IntVar(&settings.httpPort, "http-port", 8042, "Port used for HTTP server")
 	flag.IntVar(&settings.logPort, "log-port", 8043, "Port used for UDP logging")
 	flag.IntVar(&settings.bitTorrentPort, "bittorrent-port", 6900, "Port used for BitTorrent incoming connections")
@@ -66,8 +45,11 @@ func main() {
 
 	log.SetOutput(io.MultiWriter(os.Stderr, NewNetwriter("udp", fmt.Sprintf("0.0.0.0:%v", settings.logPort))))
 
-	bitTorrentStart()
-	httpStart()
-	httpStop()
-	bitTorrentStop()
+	bitTorrent := NewBitTorrent(&settings)
+	http := NewHttp(&settings, bitTorrent)
+
+	bitTorrent.Start()
+	http.Start()
+	http.Stop()
+	bitTorrent.Stop()
 }

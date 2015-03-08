@@ -7,7 +7,7 @@ type NetWriter struct {
 	address string
 }
 
-func NewNetwriter(network string, address string) *NetWriter {
+func NewNetWriter(network string, address string) *NetWriter {
 	return &NetWriter{network: network, address: address}
 }
 

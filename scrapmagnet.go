@@ -43,7 +43,7 @@ func main() {
 	flag.StringVar(&settings.proxyPassword, "proxy-password", "", "Proxy password")
 	flag.Parse()
 
-	log.SetOutput(io.MultiWriter(os.Stderr, NewNetwriter("udp", fmt.Sprintf("0.0.0.0:%v", settings.logPort))))
+	log.SetOutput(io.MultiWriter(os.Stderr, NewNetWriter("udp", fmt.Sprintf("127.0.0.1:%v", settings.logPort))))
 
 	bitTorrent := NewBitTorrent(&settings)
 	http := NewHttp(&settings, bitTorrent)

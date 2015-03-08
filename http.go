@@ -8,7 +8,7 @@ import (
 	"time"
 
 	"github.com/drone/routes"
-	"github.com/zenazn/goji/graceful"
+	"github.com/stretchr/graceful"
 )
 
 var httpInstance *Http = nil
@@ -20,12 +20,6 @@ type Http struct {
 }
 
 func NewHttp(settings *Settings, bitTorrent *BitTorrent) *Http {
-	return &Http{settings: settings, bitTorrent: bitTorrent}
-}
-
-func (h *Http) Start() {
-	httpInstance = h
-
 	mime.AddExtensionType(".avi", "video/avi")
 	mime.AddExtensionType(".mkv", "video/x-matroska")
 	mime.AddExtensionType(".mp4", "video/mp4")
@@ -37,8 +31,24 @@ func (h *Http) Start() {
 	mux.Get("/files/:infohash/:filepath(.+)", files)
 	mux.Get("/shutdown", shutdown)
 
+	return &Http{
+		settings:   settings,
+		bitTorrent: bitTorrent,
+		server: &graceful.Server{
+			Timeout: 500 * time.Millisecond,
+			Server: &http.Server{
+				Addr:    fmt.Sprintf("%v:%v", "0.0.0.0", settings.httpPort),
+				Handler: mux,
+			},
+		},
+	}
+}
+
+func (h *Http) Start() {
+	httpInstance = h
+
 	log.Println("[HTTP] Listening on port", h.settings.httpPort)
-	graceful.ListenAndServe(fmt.Sprintf("0.0.0.0:%v", h.settings.httpPort), mux)
+	h.server.ListenAndServe()
 }
 
 func (h *Http) Stop() {
@@ -65,7 +75,7 @@ func add(w http.ResponseWriter, r *http.Request) {
 
 func shutdown(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
-	graceful.Shutdown()
+	httpInstance.server.Stop(500 * time.Millisecond)
 }
 
 func files(w http.ResponseWriter, r *http.Request) {

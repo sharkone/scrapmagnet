@@ -73,6 +73,28 @@ func (tfi *TorrentFileInfo) GetPieceMap() []string {
 	return result
 }
 
+func (tfi *TorrentFileInfo) SetInitialPriority() {
+	start := tfi.startPiece
+	end := start + tfi.getLookAhead()
+	if end > tfi.endPiece {
+		end = tfi.endPiece
+	}
+
+	for i := start; i <= end; i++ {
+		tfi.handle.Piece_priority(i, 7)
+	}
+
+	start = tfi.endPiece - tfi.getLookAhead()
+	if start < tfi.startPiece {
+		start = tfi.startPiece
+	}
+	end = tfi.endPiece
+
+	for i := start; i <= end; i++ {
+		tfi.handle.Piece_priority(i, 7)
+	}
+}
+
 func (tfi *TorrentFileInfo) Open(downloadDir string) bool {
 	if tfi.file == nil {
 		fullpath := path.Join(downloadDir, tfi.Path)
@@ -432,6 +454,10 @@ func (b *BitTorrent) alertPump() {
 				log.Printf("%s: %s", alert.What(), alert.Message())
 				torrentRemovedAlert := libtorrent.SwigcptrTorrent_removed_alert(alert.Swigcptr())
 				b.onTorrentRemoved(torrentRemovedAlert.GetHandle())
+			case libtorrent.Metadata_received_alertAlert_type:
+				log.Printf("%s: %s", alert.What(), alert.Message())
+				metadataReceivedAlert := libtorrent.SwigcptrMetadata_received_alert(alert.Swigcptr())
+				b.onMetadataReceived(metadataReceivedAlert.GetHandle())
 			case libtorrent.Torrent_deleted_alertAlert_type:
 				log.Printf("%s: %s", alert.What(), alert.Message())
 				b.deleteChan <- true
@@ -499,4 +525,11 @@ func (b *BitTorrent) onTorrentRemoved(handle libtorrent.Torrent_handle) {
 	delete(b.connections, infoHash)
 	delete(b.paused, infoHash)
 	b.removeChan <- true
+}
+
+func (b *BitTorrent) onMetadataReceived(handle libtorrent.Torrent_handle) {
+	torrentInfo := b.GetTorrentInfo(fmt.Sprintf("%X", handle.Info_hash().To_string()))
+	for i := 0; i < len(torrentInfo.Files); i++ {
+		torrentInfo.Files[i].SetInitialPriority()
+	}
 }

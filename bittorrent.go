@@ -18,18 +18,20 @@ type TorrentFileInfo struct {
 	TotalPieces    int      `json:"total_pieces"`
 	PieceMap       []string `json:"piece_map"`
 
-	handle     libtorrent.Torrent_handle
-	offset     int64
-	startPiece int
-	endPiece   int
-	file       *os.File
+	handle      libtorrent.Torrent_handle
+	offset      int64
+	pieceLength int
+	startPiece  int
+	endPiece    int
+	file        *os.File
 }
 
-func NewTorrentFileInfo(path string, size int64, offset int64, handle libtorrent.Torrent_handle) *TorrentFileInfo {
+func NewTorrentFileInfo(path string, size int64, offset int64, pieceLength int, handle libtorrent.Torrent_handle) *TorrentFileInfo {
 	result := &TorrentFileInfo{}
 	result.Path = path
 	result.Size = size
 	result.offset = offset
+	result.pieceLength = pieceLength
 	result.handle = handle
 	result.startPiece = result.GetPieceIndexFromOffset(0)
 	result.endPiece = result.GetPieceIndexFromOffset(size)
@@ -40,7 +42,7 @@ func NewTorrentFileInfo(path string, size int64, offset int64, handle libtorrent
 }
 
 func (tfi *TorrentFileInfo) GetPieceIndexFromOffset(offset int64) int {
-	pieceIndex := int((tfi.offset + offset) / int64(tfi.handle.Torrent_file().Piece_length()))
+	pieceIndex := int((tfi.offset + offset) / int64(tfi.pieceLength))
 	return pieceIndex
 }
 
@@ -99,7 +101,7 @@ func (tfi *TorrentFileInfo) Read(data []byte) (int, error) {
 	size := len(data)
 
 	for size > 0 {
-		readSize := int64(math.Min(float64(size), float64(tfi.handle.Torrent_file().Piece_length())))
+		readSize := int64(math.Min(float64(size), float64(tfi.pieceLength)))
 
 		currentPosition, _ := tfi.file.Seek(0, os.SEEK_CUR)
 		pieceIndex := tfi.GetPieceIndexFromOffset(currentPosition + readSize)
@@ -239,7 +241,7 @@ func NewTorrentInfo(handle libtorrent.Torrent_handle) (result *TorrentInfo) {
 	if torrentInfo.Swigcptr() != 0 {
 		result.Files = func(torrentInfo libtorrent.Torrent_info) (result []*TorrentFileInfo) {
 			for i := 0; i < torrentInfo.Files().Num_files(); i++ {
-				result = append(result, NewTorrentFileInfo(torrentInfo.Files().File_path(i), torrentInfo.Files().File_size(i), torrentInfo.Files().File_offset(i), handle))
+				result = append(result, NewTorrentFileInfo(torrentInfo.Files().File_path(i), torrentInfo.Files().File_size(i), torrentInfo.Files().File_offset(i), torrentInfo.Piece_length(), handle))
 			}
 			return result
 		}(torrentInfo)

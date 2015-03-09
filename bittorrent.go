@@ -109,7 +109,7 @@ func (tfi *TorrentFileInfo) Read(data []byte) (int, error) {
 		read, err := tfi.file.Read(tmpData)
 		if err != nil {
 			totalRead += read
-			log.Println("[BITTORRENT]", tfi.file.Fd(), "Read failed!", read, readSize, currentPosition, err)
+			log.Println("[BITTORRENT]", tfi.file.Fd(), "Read failed", read, readSize, currentPosition, err)
 			return totalRead, err
 		}
 
@@ -177,13 +177,12 @@ func (tfi *TorrentFileInfo) getLookAhead() int {
 }
 
 type TorrentInfo struct {
-	InfoHash     string             `json:"info_hash"`
 	Name         string             `json:"name"`
+	InfoHash     string             `json:"info_hash"`
 	DownloadDir  string             `json:"download_dir"`
 	State        int                `json:"state"`
 	StateStr     string             `json:"state_str"`
 	Paused       bool               `json:"paused"`
-	Files        []*TorrentFileInfo `json:"files"`
 	Size         int64              `json:"size"`
 	Pieces       int                `json:"pieces"`
 	Progress     float32            `json:"progress"`
@@ -193,10 +192,11 @@ type TorrentInfo struct {
 	TotalSeeds   int                `json:"total_seeds"`
 	Peers        int                `json:"peers"`
 	TotalPeers   int                `json:"total_peers"`
+	Files        []*TorrentFileInfo `json:"files"`
 }
 
 func NewTorrentInfo(handle libtorrent.Torrent_handle) (result *TorrentInfo) {
-	result = &TorrentInfo{ /*connections: 0, connectionChan: make(chan int, 10)*/ }
+	result = &TorrentInfo{}
 
 	torrentStatus := handle.Status()
 
@@ -282,7 +282,7 @@ func NewBitTorrent(settings *Settings) *BitTorrent {
 }
 
 func (b *BitTorrent) Start() {
-	log.Println("[BITTORRENT] Starting")
+	log.Println("Starting")
 
 	fingerprint := libtorrent.NewFingerprint("LT", libtorrent.LIBTORRENT_VERSION_MAJOR, libtorrent.LIBTORRENT_VERSION_MINOR, 0, 0)
 	portRange := libtorrent.NewStd_pair_int_int(b.settings.bitTorrentPort, b.settings.bitTorrentPort)
@@ -293,8 +293,13 @@ func (b *BitTorrent) Start() {
 	b.session = libtorrent.NewSession(fingerprint, portRange, listenInterface, sessionFlags, alertMask)
 	go b.alertPump()
 
+	if b.settings.uPNPNatPMPEnabled {
+		log.Println("Starting UPNP/NATPMP")
+		b.session.Start_upnp()
+		b.session.Start_natpmp()
+	}
+
 	sessionSettings := b.session.Settings()
-	sessionSettings.SetSsl_listen(0)
 	sessionSettings.SetAnnounce_to_all_tiers(true)
 	sessionSettings.SetAnnounce_to_all_trackers(true)
 	sessionSettings.SetConnection_speed(100)
@@ -333,12 +338,6 @@ func (b *BitTorrent) Start() {
 
 	b.session.Start_dht()
 	b.session.Start_lsd()
-
-	if b.settings.uPNPNatPMPEnabled {
-		log.Println("[BITTORRENT] Starting UPNP/NATPMP")
-		b.session.Start_upnp()
-		b.session.Start_natpmp()
-	}
 }
 
 func (b *BitTorrent) Stop() {
@@ -346,16 +345,16 @@ func (b *BitTorrent) Stop() {
 		b.removeTorrent(b.session.Get_torrents().Get(i))
 	}
 
+	b.session.Stop_lsd()
+	b.session.Stop_dht()
+
 	if b.settings.uPNPNatPMPEnabled {
-		log.Println("[BITTORRENT] Stopping UPNP/NATPMP")
+		log.Println("Stopping UPNP/NATPMP")
 		b.session.Stop_natpmp()
 		b.session.Stop_upnp()
 	}
 
-	b.session.Stop_lsd()
-	b.session.Stop_dht()
-
-	log.Println("[BITTORRENT] Stopping")
+	log.Println("Stopping")
 }
 
 func (b *BitTorrent) AddTorrent(magnetLink string, downloadDir string) {
@@ -424,18 +423,18 @@ func (b *BitTorrent) alertPump() {
 			alert := b.session.Pop_alert()
 			switch alert.Xtype() {
 			case libtorrent.Torrent_added_alertAlert_type:
-				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
+				log.Printf("%s: %s", alert.What(), alert.Message())
 				torrentAddedAlert := libtorrent.SwigcptrTorrent_added_alert(alert.Swigcptr())
 				b.onTorrentAdded(torrentAddedAlert.GetHandle())
 			case libtorrent.Torrent_removed_alertAlert_type:
-				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
+				log.Printf("%s: %s", alert.What(), alert.Message())
 				torrentRemovedAlert := libtorrent.SwigcptrTorrent_removed_alert(alert.Swigcptr())
 				b.onTorrentRemoved(torrentRemovedAlert.GetHandle())
 			case libtorrent.Torrent_deleted_alertAlert_type:
-				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
+				log.Printf("%s: %s", alert.What(), alert.Message())
 				b.deleteChan <- true
 			case libtorrent.Torrent_delete_failed_alertAlert_type:
-				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
+				log.Printf("%s: %s", alert.What(), alert.Message())
 				b.deleteChan <- false
 			case libtorrent.Add_torrent_alertAlert_type:
 				// Ignore
@@ -448,7 +447,7 @@ func (b *BitTorrent) alertPump() {
 			case libtorrent.Tracker_error_alertAlert_type:
 				// Ignore
 			default:
-				log.Printf("[BITTORRENT] %s: %s", alert.What(), alert.Message())
+				log.Printf("%s: %s", alert.What(), alert.Message())
 			}
 		}
 	}

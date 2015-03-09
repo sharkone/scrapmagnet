@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"mime"
 	"net/http"
 	"time"
@@ -46,13 +45,10 @@ func NewHttp(settings *Settings, bitTorrent *BitTorrent) *Http {
 
 func (h *Http) Start() {
 	httpInstance = h
-
-	log.Println("[HTTP] Listening on port", h.settings.httpPort)
 	h.server.ListenAndServe()
 }
 
 func (h *Http) Stop() {
-	log.Println("[HTTP] Stopping")
 }
 
 func add(w http.ResponseWriter, r *http.Request) {

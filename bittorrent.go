@@ -133,7 +133,7 @@ func (tfi *TorrentFileInfo) Read(data []byte) (int, error) {
 		read, err := tfi.file.Read(tmpData)
 		if err != nil {
 			totalRead += read
-			log.Println("[BITTORRENT]", tfi.file.Fd(), "Read failed", read, readSize, currentPosition, err)
+			log.Println("[BITTORRENT]", "Read failed", read, readSize, currentPosition, err)
 			return totalRead, err
 		}
 
@@ -163,7 +163,7 @@ func (tfi *TorrentFileInfo) Seek(offset int64, whence int) (int64, error) {
 
 	ret, err := tfi.file.Seek(offset, whence)
 	if err != nil || ret != newPosition {
-		log.Println("[BITTORRENT]", tfi.file.Fd(), "Seek failed", ret, newPosition, err)
+		log.Println("[BITTORRENT]", "Seek failed", ret, newPosition, err)
 	}
 
 	return ret, err
@@ -282,13 +282,20 @@ func (ti *TorrentInfo) GetTorrentFileInfo(filePath string) *TorrentFileInfo {
 	return nil
 }
 
+func (ti *TorrentInfo) GetBiggestTorrentFileInfo() (result *TorrentFileInfo) {
+	for _, torrentFileInfo := range ti.Files {
+		if result == nil || torrentFileInfo.Size > result.Size {
+			result = torrentFileInfo
+		}
+	}
+	return result
+}
+
 type BitTorrent struct {
 	settings *Settings
 	session  libtorrent.Session
 
 	connectionChans map[string]chan int
-	connections     map[string]int
-	paused          map[string]bool
 
 	removeChan chan bool
 	deleteChan chan bool
@@ -298,10 +305,8 @@ func NewBitTorrent(settings *Settings) *BitTorrent {
 	return &BitTorrent{
 		settings:        settings,
 		connectionChans: make(map[string]chan int),
-		connections:     make(map[string]int),
-		paused:          make(map[string]bool),
-		removeChan:      make(chan bool, 1),
-		deleteChan:      make(chan bool, 1),
+		removeChan:      make(chan bool),
+		deleteChan:      make(chan bool),
 	}
 }
 
@@ -395,7 +400,10 @@ func (b *BitTorrent) GetTorrentInfos() (result []*TorrentInfo) {
 	result = make([]*TorrentInfo, 0, 0)
 	handles := b.session.Get_torrents()
 	for i := 0; i < int(handles.Size()); i++ {
-		result = append(result, NewTorrentInfo(handles.Get(i)))
+		infoHash := fmt.Sprintf("%X", handles.Get(i).Info_hash().To_string())
+		if _, ok := b.connectionChans[infoHash]; ok {
+			result = append(result, NewTorrentInfo(handles.Get(i)))
+		}
 	}
 	return result
 }
@@ -405,7 +413,9 @@ func (b *BitTorrent) GetTorrentInfo(infoHash string) *TorrentInfo {
 	for i := 0; i < int(handles.Size()); i++ {
 		handle := handles.Get(i)
 		if infoHash == fmt.Sprintf("%X", handle.Info_hash().To_string()) {
-			return NewTorrentInfo(handle)
+			if _, ok := b.connectionChans[infoHash]; ok {
+				return NewTorrentInfo(handle)
+			}
 		}
 	}
 	return nil
@@ -466,6 +476,8 @@ func (b *BitTorrent) alertPump() {
 				b.deleteChan <- false
 			case libtorrent.Add_torrent_alertAlert_type:
 				// Ignore
+			case libtorrent.Torrent_finished_alertAlert_type:
+				// Ignore
 			case libtorrent.Cache_flushed_alertAlert_type:
 				// Ignore
 			case libtorrent.External_ip_alertAlert_type:
@@ -482,38 +494,49 @@ func (b *BitTorrent) alertPump() {
 }
 
 func (b *BitTorrent) onTorrentAdded(handle libtorrent.Torrent_handle) {
-	go func() {
-		infoHash := fmt.Sprintf("%X", handle.Info_hash().To_string())
+	infoHash := fmt.Sprintf("%X", handle.Info_hash().To_string())
 
-		b.connectionChans[infoHash] = make(chan int)
-		b.connections[infoHash] = 0
-		b.paused[infoHash] = false
+	b.connectionChans[infoHash] = make(chan int)
+
+	go func() {
+		connections := 0
+		watcherRunning := false
+		resumeChan := make(chan bool)
 
 		for {
-			if b.connections[infoHash] == 0 {
-				if !b.paused[infoHash] {
-					select {
-					case inc := <-b.connectionChans[infoHash]:
-						b.resumeTorrent(handle)
-						b.connections[infoHash] += inc
-						b.paused[infoHash] = false
-					case <-time.After(time.Duration(b.settings.inactivityPauseTimeout) * time.Second):
-						b.pauseTorrent(handle)
-						b.paused[infoHash] = true
-					}
-				} else {
-					select {
-					case inc := <-b.connectionChans[infoHash]:
-						b.resumeTorrent(handle)
-						b.connections[infoHash] += inc
-						b.paused[infoHash] = false
-					case <-time.After(time.Duration(b.settings.inactivityRemoveTimeout) * time.Second):
-						b.removeTorrent(handle)
-						return
-					}
+			connections += <-b.connectionChans[infoHash]
+			if connections > 0 {
+				if watcherRunning {
+					resumeChan <- true
 				}
 			} else {
-				b.connections[infoHash] += <-b.connectionChans[infoHash]
+				go func() {
+					watcherRunning = true
+					paused := false
+				Watcher:
+					for {
+						if !paused {
+							select {
+							case <-resumeChan:
+								break Watcher
+							case <-time.After(time.Duration(b.settings.inactivityPauseTimeout) * time.Second):
+								b.pauseTorrent(handle)
+								paused = true
+							}
+						} else {
+							select {
+							case <-resumeChan:
+								b.resumeTorrent(handle)
+								break Watcher
+							case <-time.After(time.Duration(b.settings.inactivityRemoveTimeout) * time.Second):
+								b.removeTorrent(handle)
+								break Watcher
+							}
+						}
+					}
+
+					watcherRunning = false
+				}()
 			}
 		}
 	}()
@@ -522,8 +545,6 @@ func (b *BitTorrent) onTorrentAdded(handle libtorrent.Torrent_handle) {
 func (b *BitTorrent) onTorrentRemoved(handle libtorrent.Torrent_handle) {
 	infoHash := fmt.Sprintf("%X", handle.Info_hash().To_string())
 	delete(b.connectionChans, infoHash)
-	delete(b.connections, infoHash)
-	delete(b.paused, infoHash)
 	b.removeChan <- true
 }
 

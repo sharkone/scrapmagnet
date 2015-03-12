@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"mime"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/drone/routes"
@@ -24,10 +26,8 @@ func NewHttp(settings *Settings, bitTorrent *BitTorrent) *Http {
 	mime.AddExtensionType(".mp4", "video/mp4")
 
 	mux := routes.New()
-	mux.Get("/add", add)
-	mux.Get("/files", files)
-	mux.Get("/files/:infohash", files)
-	mux.Get("/files/:infohash/:filepath(.+)", files)
+	mux.Get("/", index)
+	mux.Get("/video", video)
 	mux.Get("/shutdown", shutdown)
 
 	return &Http{
@@ -51,19 +51,67 @@ func (h *Http) Start() {
 func (h *Http) Stop() {
 }
 
-func add(w http.ResponseWriter, r *http.Request) {
+func index(w http.ResponseWriter, r *http.Request) {
+	routes.ServeJson(w, httpInstance.bitTorrent.GetTorrentInfos())
+}
+
+func video(w http.ResponseWriter, r *http.Request) {
 	downloadDir := r.URL.Query().Get("download_dir")
 	if downloadDir == "" {
 		downloadDir = "."
 	}
 
-	if magnetLink := r.URL.Query().Get("magnet"); magnetLink != "" {
-		httpInstance.bitTorrent.AddTorrent(magnetLink, downloadDir)
-		type AddResponse struct {
-			magnetLink  string `json:"magnet_link"`
-			downloadDir string `json:"download_dir"`
+	preview := r.URL.Query().Get("preview")
+	if preview == "" {
+		preview = "0"
+	}
+
+	if magnetLink := r.URL.Query().Get("magnet_link"); magnetLink != "" {
+		if regExpMatch := regexp.MustCompile(`xt=urn:btih:([a-zA-Z0-9]+)`).FindStringSubmatch(magnetLink); len(regExpMatch) == 2 {
+			infoHash := regExpMatch[1]
+
+			httpInstance.bitTorrent.AddTorrent(magnetLink, downloadDir)
+
+			if torrentInfo := httpInstance.bitTorrent.GetTorrentInfo(infoHash); torrentInfo != nil {
+				httpInstance.bitTorrent.AddConnection(infoHash)
+				defer httpInstance.bitTorrent.RemoveConnection(infoHash)
+
+				if torrentFileInfo := torrentInfo.GetBiggestTorrentFileInfo(); torrentFileInfo != nil && torrentFileInfo.CompletePieces > 0 {
+					if preview == "0" {
+						if torrentFileInfo.Open(torrentInfo.DownloadDir) {
+							defer torrentFileInfo.Close()
+							log.Print("Video ready: Serving")
+							http.ServeContent(w, r, torrentFileInfo.Path, time.Time{}, torrentFileInfo)
+						} else {
+							http.Error(w, "Failed to open file", http.StatusInternalServerError)
+						}
+					} else {
+						log.Print("Video ready: Sending response")
+						videoReady(w, true)
+					}
+				} else {
+					// Video not ready yet
+					if preview == "0" {
+						log.Print("Video not ready: Redirecting")
+						redirect(w, r)
+					} else {
+						log.Print("Video not ready: Sending response")
+						videoReady(w, false)
+					}
+				}
+			} else {
+				// Torrent not ready yet
+				if preview == "0" {
+					log.Print("Torrent not ready: Redirecting")
+					redirect(w, r)
+				} else {
+					log.Print("Torrent not ready: Sending response")
+					videoReady(w, false)
+				}
+			}
+		} else {
+			http.Error(w, "Invalid Magnet link", http.StatusBadRequest)
 		}
-		routes.ServeJson(w, AddResponse{magnetLink: magnetLink, downloadDir: downloadDir})
 	} else {
 		http.Error(w, "Missing Magnet link", http.StatusBadRequest)
 	}
@@ -74,32 +122,14 @@ func shutdown(w http.ResponseWriter, r *http.Request) {
 	httpInstance.server.Stop(500 * time.Millisecond)
 }
 
-func files(w http.ResponseWriter, r *http.Request) {
-	infoHash := r.URL.Query().Get(":infohash")
-	filePath := r.URL.Query().Get(":filepath")
+func redirect(w http.ResponseWriter, r *http.Request) {
+	time.Sleep(2 * time.Second)
+	http.Redirect(w, r, r.URL.String(), http.StatusTemporaryRedirect)
+}
 
-	if infoHash != "" {
-		if torrentInfo := httpInstance.bitTorrent.GetTorrentInfo(infoHash); torrentInfo != nil {
-			httpInstance.bitTorrent.AddConnection(infoHash)
-			defer httpInstance.bitTorrent.RemoveConnection(infoHash)
-			if filePath != "" {
-				if torrentFileInfo := torrentInfo.GetTorrentFileInfo(filePath); torrentFileInfo != nil {
-					if torrentFileInfo.Open(torrentInfo.DownloadDir) {
-						defer torrentFileInfo.Close()
-						http.ServeContent(w, r, filePath, time.Time{}, torrentFileInfo)
-					} else {
-						http.Error(w, "Failed to open file", http.StatusInternalServerError)
-					}
-				} else {
-					http.NotFound(w, r)
-				}
-			} else {
-				routes.ServeJson(w, torrentInfo)
-			}
-		} else {
-			http.Error(w, "Invalid info hash", http.StatusNotFound)
-		}
-	} else {
-		routes.ServeJson(w, httpInstance.bitTorrent.GetTorrentInfos())
+func videoReady(w http.ResponseWriter, videoReady bool) {
+	type VideoReadyResponse struct {
+		VideoReady bool `json:"video_ready"`
 	}
+	routes.ServeJson(w, VideoReadyResponse{VideoReady: videoReady})
 }

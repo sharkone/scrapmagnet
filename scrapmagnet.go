@@ -23,10 +23,15 @@ type Settings struct {
 	proxyPort               int
 	proxyUser               string
 	proxyPassword           string
+	mixpanelToken           string
+	mixpanelData            string
 }
 
+var (
+	settings = Settings{}
+)
+
 func main() {
-	settings := Settings{}
 	flag.IntVar(&settings.httpPort, "http-port", 8042, "Port used for HTTP server")
 	flag.IntVar(&settings.logPort, "log-port", 8043, "Port used for UDP logging")
 	flag.IntVar(&settings.bitTorrentPort, "bittorrent-port", 6900, "Port used for BitTorrent incoming connections")
@@ -41,12 +46,14 @@ func main() {
 	flag.IntVar(&settings.proxyPort, "proxy-port", 1080, "Proxy port")
 	flag.StringVar(&settings.proxyUser, "proxy-user", "", "Proxy user")
 	flag.StringVar(&settings.proxyPassword, "proxy-password", "", "Proxy password")
+	flag.StringVar(&settings.mixpanelToken, "mixpanel-token", "", "Mixpanel token")
+	flag.StringVar(&settings.mixpanelData, "mixpanel-data", "", "Mixpanel data")
 	flag.Parse()
 
 	log.SetOutput(io.MultiWriter(os.Stderr, NewNetWriter("udp", fmt.Sprintf("127.0.0.1:%v", settings.logPort))))
 
-	bitTorrent := NewBitTorrent(&settings)
-	http := NewHttp(&settings, bitTorrent)
+	bitTorrent := NewBitTorrent()
+	http := NewHttp(bitTorrent)
 
 	bitTorrent.Start()
 	http.Start()

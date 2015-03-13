@@ -2,7 +2,6 @@ package main
 
 import (
 	"fmt"
-	"log"
 	"mime"
 	"net/http"
 	"regexp"
@@ -15,12 +14,11 @@ import (
 var httpInstance *Http = nil
 
 type Http struct {
-	settings   *Settings
 	bitTorrent *BitTorrent
 	server     *graceful.Server
 }
 
-func NewHttp(settings *Settings, bitTorrent *BitTorrent) *Http {
+func NewHttp(bitTorrent *BitTorrent) *Http {
 	mime.AddExtensionType(".avi", "video/avi")
 	mime.AddExtensionType(".mkv", "video/x-matroska")
 	mime.AddExtensionType(".mp4", "video/mp4")
@@ -31,7 +29,6 @@ func NewHttp(settings *Settings, bitTorrent *BitTorrent) *Http {
 	mux.Get("/shutdown", shutdown)
 
 	return &Http{
-		settings:   settings,
 		bitTorrent: bitTorrent,
 		server: &graceful.Server{
 			Timeout: 500 * time.Millisecond,
@@ -56,17 +53,11 @@ func index(w http.ResponseWriter, r *http.Request) {
 }
 
 func video(w http.ResponseWriter, r *http.Request) {
-	downloadDir := r.URL.Query().Get("download_dir")
-	if downloadDir == "" {
-		downloadDir = "."
-	}
+	magnetLink := getQueryParam(r, "magnet_link", "")
+	downloadDir := getQueryParam(r, "download_dir", ".")
+	preview := getQueryParam(r, "preview", "0")
 
-	preview := r.URL.Query().Get("preview")
-	if preview == "" {
-		preview = "0"
-	}
-
-	if magnetLink := r.URL.Query().Get("magnet_link"); magnetLink != "" {
+	if magnetLink != "" {
 		if regExpMatch := regexp.MustCompile(`xt=urn:btih:([a-zA-Z0-9]+)`).FindStringSubmatch(magnetLink); len(regExpMatch) == 2 {
 			infoHash := regExpMatch[1]
 
@@ -80,32 +71,26 @@ func video(w http.ResponseWriter, r *http.Request) {
 					if preview == "0" {
 						if torrentFileInfo.Open(torrentInfo.DownloadDir) {
 							defer torrentFileInfo.Close()
-							log.Print("Video ready: Serving")
 							http.ServeContent(w, r, torrentFileInfo.Path, time.Time{}, torrentFileInfo)
 						} else {
 							http.Error(w, "Failed to open file", http.StatusInternalServerError)
 						}
 					} else {
-						log.Print("Video ready: Sending response")
 						videoReady(w, true)
 					}
 				} else {
 					// Video not ready yet
 					if preview == "0" {
-						log.Print("Video not ready: Redirecting")
 						redirect(w, r)
 					} else {
-						log.Print("Video not ready: Sending response")
 						videoReady(w, false)
 					}
 				}
 			} else {
 				// Torrent not ready yet
 				if preview == "0" {
-					log.Print("Torrent not ready: Redirecting")
 					redirect(w, r)
 				} else {
-					log.Print("Torrent not ready: Sending response")
 					videoReady(w, false)
 				}
 			}
@@ -122,14 +107,19 @@ func shutdown(w http.ResponseWriter, r *http.Request) {
 	httpInstance.server.Stop(500 * time.Millisecond)
 }
 
+func getQueryParam(r *http.Request, paramName string, defaultValue string) (result string) {
+	result = r.URL.Query().Get(paramName)
+	if result == "" {
+		result = defaultValue
+	}
+	return result
+}
+
 func redirect(w http.ResponseWriter, r *http.Request) {
 	time.Sleep(2 * time.Second)
 	http.Redirect(w, r, r.URL.String(), http.StatusTemporaryRedirect)
 }
 
 func videoReady(w http.ResponseWriter, videoReady bool) {
-	type VideoReadyResponse struct {
-		VideoReady bool `json:"video_ready"`
-	}
-	routes.ServeJson(w, VideoReadyResponse{VideoReady: videoReady})
+	routes.ServeJson(w, map[string]interface{}{"video_ready": videoReady})
 }

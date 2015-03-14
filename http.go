@@ -6,6 +6,7 @@ import (
 	"mime"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/drone/routes"
@@ -52,8 +53,6 @@ func (h *Http) Start() {
 					log.Print("Parent process is dead, exiting")
 					httpInstance.server.Stop(500 * time.Millisecond)
 					return
-				} else {
-					log.Print(p)
 				}
 				time.Sleep(time.Second)
 			}
@@ -78,7 +77,7 @@ func video(w http.ResponseWriter, r *http.Request) {
 
 	if magnetLink != "" {
 		if regExpMatch := regexp.MustCompile(`xt=urn:btih:([a-zA-Z0-9]+)`).FindStringSubmatch(magnetLink); len(regExpMatch) == 2 {
-			infoHash := regExpMatch[1]
+			infoHash := strings.ToUpper(regExpMatch[1])
 
 			httpInstance.bitTorrent.AddTorrent(magnetLink, downloadDir)
 
@@ -86,7 +85,7 @@ func video(w http.ResponseWriter, r *http.Request) {
 				httpInstance.bitTorrent.AddConnection(infoHash)
 				defer httpInstance.bitTorrent.RemoveConnection(infoHash)
 
-				if torrentFileInfo := torrentInfo.GetBiggestTorrentFileInfo(); torrentFileInfo != nil && torrentFileInfo.CompletePieces > 0 {
+				if torrentFileInfo := torrentInfo.GetBiggestTorrentFileInfo(); torrentFileInfo != nil {
 					if preview == "0" {
 						if torrentFileInfo.Open(torrentInfo.DownloadDir) {
 							defer torrentFileInfo.Close()

@@ -86,15 +86,7 @@ func (tfi *TorrentFileInfo) SetInitialPriority() {
 		tfi.handle.Piece_priority(i, 7)
 	}
 
-	start = tfi.endPiece - tfi.getLookAhead()
-	if start < tfi.startPiece {
-		start = tfi.startPiece
-	}
-	end = tfi.endPiece
-
-	for i := start; i <= end; i++ {
-		tfi.handle.Piece_priority(i, 7)
-	}
+	tfi.handle.Set_piece_deadline(tfi.endPiece, 10000, 0)
 }
 
 func (tfi *TorrentFileInfo) Open(downloadDir string) bool {

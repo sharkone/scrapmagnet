@@ -24,9 +24,8 @@ type TorrentFileInfo struct {
 	startPiece  int
 	endPiece    int
 
-	file        *os.File
-	bytesRead   int
-	servingSent bool
+	file      *os.File
+	bytesRead int
 }
 
 func NewTorrentFileInfo(path string, size int64, offset int64, pieceLength int, handle libtorrent.Torrent_handle) *TorrentFileInfo {
@@ -111,7 +110,6 @@ func (tfi *TorrentFileInfo) Open(downloadDir string) bool {
 
 		tfi.file, _ = os.Open(fullpath)
 		tfi.bytesRead = 0
-		tfi.servingSent = false
 	}
 
 	return tfi.file != nil
@@ -149,12 +147,12 @@ func (tfi *TorrentFileInfo) Read(data []byte) (int, error) {
 
 	tfi.bytesRead += totalRead
 
-	if tfi.bytesRead > (10*1024*1024) && !tfi.servingSent {
+	if tfi.bytesRead > (10*1024*1024) && !bitTorrent.served[fmt.Sprintf("%X", tfi.handle.Info_hash().To_string())] {
 		hash := fmt.Sprintf("%X", tfi.handle.Info_hash().To_string())
 		name := tfi.handle.Status().GetName()
 		log.Printf("%v: %v serving", hash[0:4], name)
 		trackingEvent("Serving", map[string]interface{}{"Magnet InfoHash": hash, "Magnet Name": name})
-		tfi.servingSent = true
+		bitTorrent.served[fmt.Sprintf("%X", tfi.handle.Info_hash().To_string())] = true
 	}
 
 	return totalRead, nil
@@ -310,6 +308,7 @@ type BitTorrent struct {
 	session libtorrent.Session
 
 	connectionChans map[string]chan int
+	served          map[string]bool
 	paused          map[string]bool
 
 	removeChan chan bool
@@ -319,6 +318,7 @@ type BitTorrent struct {
 func NewBitTorrent() *BitTorrent {
 	return &BitTorrent{
 		connectionChans: make(map[string]chan int),
+		served:          make(map[string]bool),
 		paused:          make(map[string]bool),
 		removeChan:      make(chan bool),
 		deleteChan:      make(chan bool),
@@ -520,6 +520,7 @@ func (b *BitTorrent) onTorrentAdded(handle libtorrent.Torrent_handle) {
 	infoHash := fmt.Sprintf("%X", handle.Info_hash().To_string())
 
 	b.connectionChans[infoHash] = make(chan int)
+	b.served[infoHash] = false
 	b.paused[infoHash] = false
 
 	go func() {
@@ -624,6 +625,8 @@ func (b *BitTorrent) onTorrentFinished(handle libtorrent.Torrent_handle) {
 
 func (b *BitTorrent) onTorrentRemoved(handle libtorrent.Torrent_handle) {
 	delete(b.connectionChans, fmt.Sprintf("%X", handle.Info_hash().To_string()))
+	delete(b.served, fmt.Sprintf("%X", handle.Info_hash().To_string()))
+	delete(b.paused, fmt.Sprintf("%X", handle.Info_hash().To_string()))
 	b.removeChan <- true
 
 	{

@@ -28,7 +28,9 @@ type Settings struct {
 }
 
 var (
-	settings = Settings{}
+	settings   = Settings{}
+	bitTorrent *BitTorrent
+	httpServer *Http
 )
 
 func main() {
@@ -52,11 +54,11 @@ func main() {
 
 	log.SetOutput(io.MultiWriter(os.Stderr, NewNetWriter("udp", fmt.Sprintf("127.0.0.1:%v", settings.logPort))))
 
-	bitTorrent := NewBitTorrent()
-	http := NewHttp(bitTorrent)
+	bitTorrent = NewBitTorrent()
+	httpServer = NewHttp(bitTorrent)
 
 	bitTorrent.Start()
-	http.Start()
-	http.Stop()
+	httpServer.Start()
+	httpServer.Stop()
 	bitTorrent.Stop()
 }

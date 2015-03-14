@@ -2,9 +2,12 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"mime"
 	"net/http"
+	"os"
 	"regexp"
+	"syscall"
 	"time"
 
 	"github.com/drone/routes"
@@ -41,6 +44,32 @@ func NewHttp(bitTorrent *BitTorrent) *Http {
 }
 
 func (h *Http) Start() {
+	// Parent process monitoring
+	if settings.parentPID != 1 {
+		go func() {
+			for {
+				parentAlive := true
+
+				p, err := os.FindProcess(settings.parentPID)
+				if err != nil {
+					parentAlive = false
+				} else {
+					err := p.Signal(syscall.Signal(0))
+					if err != nil {
+						parentAlive = false
+					}
+				}
+
+				if !parentAlive {
+					log.Print("Parent process is dead, exiting")
+					httpInstance.server.Stop(500 * time.Millisecond)
+
+				}
+				time.Sleep(time.Second)
+			}
+		}()
+	}
+
 	httpInstance = h
 	h.server.ListenAndServe()
 }

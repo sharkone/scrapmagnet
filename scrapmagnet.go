@@ -9,6 +9,7 @@ import (
 )
 
 type Settings struct {
+	parentPID               int
 	httpPort                int
 	logPort                 int
 	bitTorrentPort          int
@@ -34,6 +35,7 @@ var (
 )
 
 func main() {
+	flag.IntVar(&settings.parentPID, "ppid", -1, "Parent PID to monitor and auto-shutdown")
 	flag.IntVar(&settings.httpPort, "http-port", 8042, "Port used for HTTP server")
 	flag.IntVar(&settings.logPort, "log-port", 8043, "Port used for UDP logging")
 	flag.IntVar(&settings.bitTorrentPort, "bittorrent-port", 6900, "Port used for BitTorrent incoming connections")

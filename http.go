@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"regexp"
+	"runtime"
 	"syscall"
 	"time"
 
@@ -53,7 +54,7 @@ func (h *Http) Start() {
 				p, err := os.FindProcess(settings.parentPID)
 				if err != nil {
 					parentAlive = false
-				} else {
+				} else if runtime.GOOS != "windows" {
 					err := p.Signal(syscall.Signal(0))
 					if err != nil {
 						parentAlive = false

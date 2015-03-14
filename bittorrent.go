@@ -77,16 +77,28 @@ func (tfi *TorrentFileInfo) GetPieceMap() []string {
 
 func (tfi *TorrentFileInfo) SetInitialPriority() {
 	start := tfi.startPiece
-	end := start + tfi.getLookAhead()
-	if end > tfi.endPiece {
-		end = tfi.endPiece
-	}
-
+	end := int(math.Min(float64(start+tfi.getLookAhead()), float64(tfi.endPiece)))
 	for i := start; i <= end; i++ {
-		tfi.handle.Piece_priority(i, 7)
+		tfi.handle.Set_piece_deadline(i, 10000, 0)
 	}
 
 	tfi.handle.Set_piece_deadline(tfi.endPiece, 10000, 0)
+}
+
+func (tfi *TorrentFileInfo) IsVideoReady() bool {
+	if !tfi.handle.Have_piece(tfi.endPiece) {
+		return false
+	}
+
+	start := tfi.startPiece
+	end := int(math.Min(float64(start+tfi.getLookAhead()), float64(tfi.endPiece)))
+	for i := start; i <= end; i++ {
+		if !tfi.handle.Have_piece(i) {
+			return false
+		}
+	}
+
+	return true
 }
 
 func (tfi *TorrentFileInfo) Open(downloadDir string) bool {

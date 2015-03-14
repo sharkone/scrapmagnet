@@ -94,7 +94,7 @@ func video(w http.ResponseWriter, r *http.Request) {
 							http.Error(w, "Failed to open file", http.StatusInternalServerError)
 						}
 					} else {
-						videoReady(w, true)
+						videoReady(w, torrentFileInfo.IsVideoReady())
 					}
 				} else {
 					// Video not ready yet

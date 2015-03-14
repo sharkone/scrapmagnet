@@ -509,6 +509,8 @@ func (b *BitTorrent) alertPump() {
 				// Ignore
 			case libtorrent.Tracker_error_alertAlert_type:
 				// Ignore
+			case libtorrent.Udp_error_alertAlert_type:
+				// Ignore
 			default:
 				log.Printf("%s: %s", alert.What(), alert.Message())
 			}

@@ -5,13 +5,11 @@ import (
 	"log"
 	"mime"
 	"net/http"
-	"os"
 	"regexp"
-	"runtime"
-	"syscall"
 	"time"
 
 	"github.com/drone/routes"
+	"github.com/mitchellh/go-ps"
 	"github.com/stretchr/graceful"
 )
 
@@ -49,22 +47,13 @@ func (h *Http) Start() {
 	if settings.parentPID != 1 {
 		go func() {
 			for {
-				parentAlive := true
-
-				p, err := os.FindProcess(settings.parentPID)
-				if err != nil {
-					parentAlive = false
-				} else if runtime.GOOS != "windows" {
-					err := p.Signal(syscall.Signal(0))
-					if err != nil {
-						parentAlive = false
-					}
-				}
-
-				if !parentAlive {
+				p, err := ps.FindProcess(settings.parentPID)
+				if p == nil || err != nil {
 					log.Print("Parent process is dead, exiting")
 					httpInstance.server.Stop(500 * time.Millisecond)
-
+					return
+				} else {
+					log.Print(p)
 				}
 				time.Sleep(time.Second)
 			}

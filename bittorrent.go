@@ -205,6 +205,8 @@ func (tfi *TorrentFileInfo) waitForPiece(pieceIndex int, timeCritical bool) bool
 			}
 		}
 
+		tfi.SetInitialPriority()
+
 		for {
 			time.Sleep(100 * time.Millisecond)
 			if tfi.handle.Have_piece(pieceIndex) {

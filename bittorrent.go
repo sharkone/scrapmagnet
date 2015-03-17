@@ -82,7 +82,7 @@ func (tfi *TorrentFileInfo) GetPieceMap() []string {
 
 func (tfi *TorrentFileInfo) SetInitialPriority() {
 	start := tfi.startPiece
-	end := int(math.Min(float64(start+tfi.getLookAhead()), float64(tfi.endPiece)))
+	end := int(math.Min(float64(start+tfi.getLookAhead(true)), float64(tfi.endPiece)))
 	for i := start; i <= end; i++ {
 		tfi.handle.Set_piece_deadline(i, 10000, 0)
 	}
@@ -91,16 +91,16 @@ func (tfi *TorrentFileInfo) SetInitialPriority() {
 }
 
 func (tfi *TorrentFileInfo) IsVideoReady() bool {
-	if !tfi.handle.Have_piece(tfi.endPiece) {
-		return false
-	}
-
 	start := tfi.startPiece
-	end := int(math.Min(float64(start+tfi.getLookAhead()), float64(tfi.endPiece)))
+	end := int(math.Min(float64(start+tfi.getLookAhead(true)), float64(tfi.endPiece)))
 	for i := start; i <= end; i++ {
 		if !tfi.handle.Have_piece(i) {
 			return false
 		}
+	}
+
+	if !tfi.handle.Have_piece(tfi.endPiece) {
+		return false
 	}
 
 	return true
@@ -193,14 +193,14 @@ func (tfi *TorrentFileInfo) waitForPiece(pieceIndex int, timeCritical bool) bool
 	if !tfi.handle.Have_piece(pieceIndex) {
 		if timeCritical {
 			tfi.handle.Clear_piece_deadlines()
-			for i := 0; i <= tfi.getLookAhead() && (i+pieceIndex) <= tfi.endPiece; i++ {
+			for i := 0; i <= tfi.getLookAhead(false) && (i+pieceIndex) <= tfi.endPiece; i++ {
 				tfi.handle.Set_piece_deadline(pieceIndex+i, 3000+i*1000, 0)
 			}
 		} else {
 			for i := tfi.startPiece; i < tfi.endPiece; i++ {
 				tfi.handle.Piece_priority(i, 1)
 			}
-			for i := 0; i <= tfi.getLookAhead()*4 && (i+pieceIndex) <= tfi.endPiece; i++ {
+			for i := 0; i <= tfi.getLookAhead(false)*4 && (i+pieceIndex) <= tfi.endPiece; i++ {
 				tfi.handle.Piece_priority(pieceIndex+i, 7)
 			}
 		}
@@ -218,7 +218,10 @@ func (tfi *TorrentFileInfo) waitForPiece(pieceIndex int, timeCritical bool) bool
 	return false
 }
 
-func (tfi *TorrentFileInfo) getLookAhead() int {
+func (tfi *TorrentFileInfo) getLookAhead(initial bool) int {
+	if initial {
+		return int(float32(tfi.TotalPieces) * bitTorrent.lookAhead[tfi.GetInfoHashStr()])
+	}
 	return int(float32(tfi.TotalPieces) * 0.005)
 }
 
@@ -335,6 +338,7 @@ func NewTorrentConnectionInfo() *TorrentConnectionInfo {
 
 type BitTorrent struct {
 	session         libtorrent.Session
+	lookAhead       map[string]float32
 	connectionInfos map[string]*TorrentConnectionInfo
 	removeChan      chan bool
 	deleteChan      chan bool
@@ -342,6 +346,7 @@ type BitTorrent struct {
 
 func NewBitTorrent() *BitTorrent {
 	return &BitTorrent{
+		lookAhead:       make(map[string]float32),
 		connectionInfos: make(map[string]*TorrentConnectionInfo),
 		removeChan:      make(chan bool),
 		deleteChan:      make(chan bool),
@@ -422,13 +427,16 @@ func (b *BitTorrent) Stop() {
 	b.session.Stop_dht()
 }
 
-func (b *BitTorrent) AddTorrent(magnetLink string, downloadDir string) {
+func (b *BitTorrent) AddTorrent(magnetLink string, downloadDir string, infoHash string, lookAhead float32) {
 	addTorrentParams := libtorrent.NewAdd_torrent_params()
 	addTorrentParams.SetUrl(magnetLink)
 	addTorrentParams.SetSave_path(downloadDir)
 	addTorrentParams.SetStorage_mode(libtorrent.Storage_mode_sparse)
 	addTorrentParams.SetFlags(0)
 
+	if _, ok := b.lookAhead[infoHash]; !ok {
+		b.lookAhead[infoHash] = lookAhead
+	}
 	b.session.Async_add_torrent(addTorrentParams)
 }
 
@@ -629,6 +637,7 @@ func (b *BitTorrent) onTorrentFinished(handle libtorrent.Torrent_handle) {
 }
 
 func (b *BitTorrent) onTorrentRemoved(handle libtorrent.Torrent_handle) {
+	delete(b.lookAhead, b.getTorrentInfoHash(handle))
 	delete(b.connectionInfos, b.getTorrentInfoHash(handle))
 	b.removeChan <- true
 

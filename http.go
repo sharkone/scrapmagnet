@@ -45,12 +45,12 @@ func NewHttp(bitTorrent *BitTorrent) *Http {
 
 func (h *Http) Start() {
 	// Parent process monitoring
-	if settings.parentPID != 1 {
+	if settings.parentPID != -1 {
 		go func() {
 			for {
 				p, err := ps.FindProcess(settings.parentPID)
 				if p == nil || err != nil {
-					log.Print("Parent process is dead, exiting")
+					log.Print("[scrapmagnet] Parent process is dead, exiting")
 					httpInstance.server.Stop(500 * time.Millisecond)
 					return
 				}
@@ -60,7 +60,10 @@ func (h *Http) Start() {
 	}
 
 	httpInstance = h
-	h.server.ListenAndServe()
+	err := h.server.ListenAndServe()
+	if err != nil {
+		log.Print(err)
+	}
 }
 
 func (h *Http) Stop() {

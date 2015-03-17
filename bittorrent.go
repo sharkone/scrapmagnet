@@ -6,6 +6,7 @@ import (
 	"math"
 	"os"
 	"path"
+	"strings"
 	"time"
 
 	"github.com/sharkone/libtorrent-go"
@@ -41,6 +42,10 @@ func NewTorrentFileInfo(path string, size int64, offset int64, pieceLength int, 
 	result.TotalPieces = 1 + result.endPiece - result.startPiece
 	result.PieceMap = result.GetPieceMap()
 	return result
+}
+
+func (tfi *TorrentFileInfo) GetInfoHashStr() string {
+	return bitTorrent.getTorrentInfoHash(tfi.handle)
 }
 
 func (tfi *TorrentFileInfo) GetPieceIndexFromOffset(offset int64) int {
@@ -140,7 +145,7 @@ func (tfi *TorrentFileInfo) Read(data []byte) (int, error) {
 		read, err := tfi.file.Read(tmpData)
 		if err != nil {
 			totalRead += read
-			log.Println("Read failed", read, readSize, currentPosition, err)
+			log.Println("[scrapmagnet] Read failed", read, readSize, currentPosition, err)
 			return totalRead, err
 		}
 
@@ -151,12 +156,10 @@ func (tfi *TorrentFileInfo) Read(data []byte) (int, error) {
 
 	tfi.bytesRead += totalRead
 
-	if tfi.bytesRead > (10*1024*1024) && !bitTorrent.served[fmt.Sprintf("%X", tfi.handle.Info_hash().To_string())] {
-		hash := fmt.Sprintf("%X", tfi.handle.Info_hash().To_string())
-		name := tfi.handle.Status().GetName()
-		log.Printf("%v: %v serving", hash[0:4], name)
-		trackingEvent("Serving", map[string]interface{}{"Magnet InfoHash": hash, "Magnet Name": name})
-		bitTorrent.served[fmt.Sprintf("%X", tfi.handle.Info_hash().To_string())] = true
+	if tfi.bytesRead > (10*1024*1024) && !bitTorrent.connectionInfos[tfi.GetInfoHashStr()].Served {
+		log.Printf("[scrapmagnet] Serving %v", tfi.handle.Status().GetName())
+		trackingEvent("Serving", map[string]interface{}{"Magnet InfoHash": tfi.GetInfoHashStr(), "Magnet Name": tfi.handle.Status().GetName()})
+		bitTorrent.connectionInfos[tfi.GetInfoHashStr()].Served = true
 	}
 
 	return totalRead, nil
@@ -180,7 +183,7 @@ func (tfi *TorrentFileInfo) Seek(offset int64, whence int) (int64, error) {
 
 	ret, err := tfi.file.Seek(offset, whence)
 	if err != nil || ret != newPosition {
-		log.Print("Seek failed", ret, newPosition, err)
+		log.Print("[scrapmagnet] Seek failed", ret, newPosition, err)
 	}
 
 	return ret, err
@@ -234,6 +237,8 @@ type TorrentInfo struct {
 	Peers        int                `json:"peers"`
 	TotalPeers   int                `json:"total_peers"`
 	Files        []*TorrentFileInfo `json:"files"`
+
+	ConnectionInfo *TorrentConnectionInfo `json:"connection_info"`
 }
 
 func NewTorrentInfo(handle libtorrent.Torrent_handle) (result *TorrentInfo) {
@@ -241,7 +246,7 @@ func NewTorrentInfo(handle libtorrent.Torrent_handle) (result *TorrentInfo) {
 
 	torrentStatus := handle.Status()
 
-	result.InfoHash = fmt.Sprintf("%X", torrentStatus.GetInfo_hash().To_string())
+	result.InfoHash = bitTorrent.getTorrentInfoHash(handle)
 	result.Name = torrentStatus.GetName()
 	result.DownloadDir = torrentStatus.GetSave_path()
 	result.State = int(torrentStatus.GetState())
@@ -287,6 +292,8 @@ func NewTorrentInfo(handle libtorrent.Torrent_handle) (result *TorrentInfo) {
 		result.Size = torrentInfo.Files().Total_size()
 		result.Pieces = torrentInfo.Num_pieces()
 	}
+
+	result.ConnectionInfo = bitTorrent.connectionInfos[result.InfoHash]
 	return result
 }
 
@@ -308,22 +315,32 @@ func (ti *TorrentInfo) GetBiggestTorrentFileInfo() (result *TorrentFileInfo) {
 	return result
 }
 
+type TorrentConnectionInfo struct {
+	connectionChan  chan int
+	ConnectionCount int  `json:"connection_count"`
+	Served          bool `json:"served"`
+	paused          bool
+}
+
+func NewTorrentConnectionInfo() *TorrentConnectionInfo {
+	return &TorrentConnectionInfo{
+		connectionChan:  make(chan int),
+		ConnectionCount: 0,
+		Served:          false,
+		paused:          false,
+	}
+}
+
 type BitTorrent struct {
-	session libtorrent.Session
-
-	connectionChans map[string]chan int
-	served          map[string]bool
-	paused          map[string]bool
-
-	removeChan chan bool
-	deleteChan chan bool
+	session         libtorrent.Session
+	connectionInfos map[string]*TorrentConnectionInfo
+	removeChan      chan bool
+	deleteChan      chan bool
 }
 
 func NewBitTorrent() *BitTorrent {
 	return &BitTorrent{
-		connectionChans: make(map[string]chan int),
-		served:          make(map[string]bool),
-		paused:          make(map[string]bool),
+		connectionInfos: make(map[string]*TorrentConnectionInfo),
 		removeChan:      make(chan bool),
 		deleteChan:      make(chan bool),
 	}
@@ -333,18 +350,12 @@ func (b *BitTorrent) Start() {
 	peopleSet()
 
 	fingerprint := libtorrent.NewFingerprint("LT", libtorrent.LIBTORRENT_VERSION_MAJOR, libtorrent.LIBTORRENT_VERSION_MINOR, 0, 0)
-	portRange := libtorrent.NewStd_pair_int_int(settings.bitTorrentPort, settings.bitTorrentPort)
-	listenInterface := "0.0.0.0"
 	sessionFlags := int(libtorrent.SessionAdd_default_plugins)
-	alertMask := int(libtorrent.AlertError_notification | libtorrent.AlertStorage_notification | libtorrent.AlertStatus_notification)
+	alertMask := uint(libtorrent.AlertError_notification | libtorrent.AlertStorage_notification | libtorrent.AlertStatus_notification)
 
-	b.session = libtorrent.NewSession(fingerprint, portRange, listenInterface, sessionFlags, alertMask)
+	b.session = libtorrent.NewSession(fingerprint, sessionFlags)
+	b.session.Set_alert_mask(alertMask)
 	go b.alertPump()
-
-	if settings.uPNPNatPMPEnabled {
-		b.session.Start_upnp()
-		b.session.Start_natpmp()
-	}
 
 	sessionSettings := b.session.Settings()
 	sessionSettings.SetAnnounce_to_all_tiers(true)
@@ -383,8 +394,16 @@ func (b *BitTorrent) Start() {
 	encryptionSettings.SetPrefer_rc4(true)
 	b.session.Set_pe_settings(encryptionSettings)
 
+	ec := libtorrent.NewError_code()
+	b.session.Listen_on(libtorrent.NewStd_pair_int_int(settings.bitTorrentPort, settings.bitTorrentPort), ec)
+
 	b.session.Start_dht()
 	b.session.Start_lsd()
+
+	if settings.uPNPNatPMPEnabled {
+		b.session.Start_upnp()
+		b.session.Start_natpmp()
+	}
 }
 
 func (b *BitTorrent) Stop() {
@@ -392,13 +411,13 @@ func (b *BitTorrent) Stop() {
 		b.removeTorrent(b.session.Get_torrents().Get(i))
 	}
 
-	b.session.Stop_lsd()
-	b.session.Stop_dht()
-
 	if settings.uPNPNatPMPEnabled {
 		b.session.Stop_natpmp()
 		b.session.Stop_upnp()
 	}
+
+	b.session.Stop_lsd()
+	b.session.Stop_dht()
 }
 
 func (b *BitTorrent) AddTorrent(magnetLink string, downloadDir string) {
@@ -415,8 +434,7 @@ func (b *BitTorrent) GetTorrentInfos() (result []*TorrentInfo) {
 	result = make([]*TorrentInfo, 0, 0)
 	handles := b.session.Get_torrents()
 	for i := 0; i < int(handles.Size()); i++ {
-		infoHash := fmt.Sprintf("%X", handles.Get(i).Info_hash().To_string())
-		if _, ok := b.connectionChans[infoHash]; ok {
+		if _, ok := b.connectionInfos[b.getTorrentInfoHash(handles.Get(i))]; ok {
 			result = append(result, NewTorrentInfo(handles.Get(i)))
 		}
 	}
@@ -426,10 +444,9 @@ func (b *BitTorrent) GetTorrentInfos() (result []*TorrentInfo) {
 func (b *BitTorrent) GetTorrentInfo(infoHash string) *TorrentInfo {
 	handles := b.session.Get_torrents()
 	for i := 0; i < int(handles.Size()); i++ {
-		handle := handles.Get(i)
-		if infoHash == fmt.Sprintf("%X", handle.Info_hash().To_string()) {
-			if _, ok := b.connectionChans[infoHash]; ok {
-				return NewTorrentInfo(handle)
+		if infoHash == b.getTorrentInfoHash(handles.Get(i)) {
+			if _, ok := b.connectionInfos[infoHash]; ok {
+				return NewTorrentInfo(handles.Get(i))
 			}
 		}
 	}
@@ -437,11 +454,15 @@ func (b *BitTorrent) GetTorrentInfo(infoHash string) *TorrentInfo {
 }
 
 func (b *BitTorrent) AddConnection(infoHash string) {
-	b.connectionChans[infoHash] <- 1
+	b.connectionInfos[infoHash].connectionChan <- 1
 }
 
 func (b *BitTorrent) RemoveConnection(infoHash string) {
-	b.connectionChans[infoHash] <- -1
+	b.connectionInfos[infoHash].connectionChan <- -1
+}
+
+func (b *BitTorrent) getTorrentInfoHash(handle libtorrent.Torrent_handle) string {
+	return fmt.Sprintf("%X", handle.Info_hash().To_string())
 }
 
 func (b *BitTorrent) pauseTorrent(handle libtorrent.Torrent_handle) {
@@ -496,7 +517,10 @@ func (b *BitTorrent) alertPump() {
 				torrentDeletedAlert := libtorrent.SwigcptrTorrent_deleted_alert(alert.Swigcptr())
 				b.onTorrentDeleted(torrentDeletedAlert.GetInfo_hash().To_string(), false)
 			case libtorrent.Listen_succeeded_alertAlert_type:
-				// Ignore
+				listenSucceedAlert := libtorrent.SwigcptrListen_succeeded_alert(alert.Swigcptr())
+				if listenSucceedAlert.GetSock_type() != libtorrent.Listen_succeeded_alertTcp_ssl && !strings.Contains(listenSucceedAlert.Message(), "[::]") {
+					log.Printf("[scrapmagnet] %s", listenSucceedAlert.Message())
+				}
 			case libtorrent.Add_torrent_alertAlert_type:
 				// Ignore
 			case libtorrent.Torrent_checked_alertAlert_type:
@@ -516,28 +540,25 @@ func (b *BitTorrent) alertPump() {
 			case libtorrent.Udp_error_alertAlert_type:
 				// Ignore
 			default:
-				log.Printf("%s: %s", alert.What(), alert.Message())
+				log.Printf("[scrapmagnet] %s: %s", alert.What(), alert.Message())
 			}
 		}
 	}
 }
 
 func (b *BitTorrent) onTorrentAdded(handle libtorrent.Torrent_handle) {
-	infoHash := fmt.Sprintf("%X", handle.Info_hash().To_string())
+	infoHash := b.getTorrentInfoHash(handle)
 
-	b.connectionChans[infoHash] = make(chan int)
-	b.served[infoHash] = false
-	b.paused[infoHash] = false
+	b.connectionInfos[infoHash] = NewTorrentConnectionInfo()
 
 	go func() {
-		connections := 0
 		watcherRunning := false
 		resumeChan := make(chan bool)
 
 		// Auto pause/remove
 		for {
-			connections += <-b.connectionChans[infoHash]
-			if connections > 0 {
+			b.connectionInfos[infoHash].ConnectionCount += <-b.connectionInfos[infoHash].connectionChan
+			if b.connectionInfos[infoHash].ConnectionCount > 0 {
 				if watcherRunning {
 					resumeChan <- true
 				}
@@ -551,7 +572,7 @@ func (b *BitTorrent) onTorrentAdded(handle libtorrent.Torrent_handle) {
 							select {
 							case <-resumeChan:
 								break Watcher
-							case <-time.After(time.Duration(settings.inactivityPauseTimeout) * time.Second):
+							case <-time.After(time.Duration(4) * time.Second):
 								b.pauseTorrent(handle)
 								paused = true
 							}
@@ -572,87 +593,55 @@ func (b *BitTorrent) onTorrentAdded(handle libtorrent.Torrent_handle) {
 		}
 	}()
 
-	{
-		hash := fmt.Sprintf("%X", handle.Info_hash().To_string())
-		name := handle.Status().GetName()
-		log.Printf("%v: %v added", hash[0:4], name)
-		trackingEvent("Added", map[string]interface{}{"Magnet InfoHash": hash, "Magnet Name": name})
-	}
+	log.Printf("[scrapmagnet] Added %v", handle.Status().GetName())
+	trackingEvent("Added", map[string]interface{}{"Magnet InfoHash": b.getTorrentInfoHash(handle), "Magnet Name": handle.Status().GetName()})
 }
 
 func (b *BitTorrent) onMetadataReceived(handle libtorrent.Torrent_handle) {
-	torrentInfo := b.GetTorrentInfo(fmt.Sprintf("%X", handle.Info_hash().To_string()))
+	torrentInfo := b.GetTorrentInfo(b.getTorrentInfoHash(handle))
 	for i := 0; i < len(torrentInfo.Files); i++ {
 		torrentInfo.Files[i].SetInitialPriority()
 	}
 
-	{
-		hash := fmt.Sprintf("%X", handle.Info_hash().To_string())
-		name := handle.Status().GetName()
-		log.Printf("%v: %v metadata received", hash[0:4], name)
-		trackingEvent("Metadata received", map[string]interface{}{"Magnet InfoHash": hash, "Magnet Name": name})
-	}
+	log.Printf("[scrapmagnet] Metadata received %v", handle.Status().GetName())
+	trackingEvent("Metadata received", map[string]interface{}{"Magnet InfoHash": b.getTorrentInfoHash(handle), "Magnet Name": handle.Status().GetName()})
 }
 
 func (b *BitTorrent) onTorrentPaused(handle libtorrent.Torrent_handle) {
-	if !b.paused[fmt.Sprintf("%X", handle.Info_hash().To_string())] {
-		{
-			hash := fmt.Sprintf("%X", handle.Info_hash().To_string())
-			name := handle.Status().GetName()
-			log.Printf("%v: %v paused", hash[0:4], name)
-			// trackingEvent("Paused", map[string]interface{}{"Magnet InfoHash": hash, "Magnet Name": name})
-		}
-
-		b.paused[fmt.Sprintf("%X", handle.Info_hash().To_string())] = true
+	if !b.connectionInfos[b.getTorrentInfoHash(handle)].paused {
+		log.Printf("[scrapmagnet] Paused %v", handle.Status().GetName())
+		b.connectionInfos[b.getTorrentInfoHash(handle)].paused = true
 	}
 }
 
 func (b *BitTorrent) onTorrentResumed(handle libtorrent.Torrent_handle) {
-	if b.paused[fmt.Sprintf("%X", handle.Info_hash().To_string())] {
-		{
-			hash := fmt.Sprintf("%X", handle.Info_hash().To_string())
-			name := handle.Status().GetName()
-			log.Printf("%v: %v resumed", hash[0:4], name)
-			// trackingEvent("Resumed", map[string]interface{}{"Magnet InfoHash": hash, "Magnet Name": name})
-		}
-
-		b.paused[fmt.Sprintf("%X", handle.Info_hash().To_string())] = false
+	if b.connectionInfos[b.getTorrentInfoHash(handle)].paused {
+		log.Printf("[scrapmagnet] Resumed %v", handle.Status().GetName())
+		b.connectionInfos[b.getTorrentInfoHash(handle)].paused = false
 	}
 }
 
 func (b *BitTorrent) onTorrentFinished(handle libtorrent.Torrent_handle) {
-	{
-		hash := fmt.Sprintf("%X", handle.Info_hash().To_string())
-		name := handle.Status().GetName()
-		log.Printf("%v: %v finished", hash[0:4], name)
-		trackingEvent("Finished", map[string]interface{}{"Magnet InfoHash": hash, "Magnet Name": name})
-	}
+	log.Printf("[scrapmagnet] Finished %v", handle.Status().GetName())
+	trackingEvent("Finished", map[string]interface{}{"Magnet InfoHash": b.getTorrentInfoHash(handle), "Magnet Name": handle.Status().GetName()})
 }
 
 func (b *BitTorrent) onTorrentRemoved(handle libtorrent.Torrent_handle) {
-	delete(b.connectionChans, fmt.Sprintf("%X", handle.Info_hash().To_string()))
-	delete(b.served, fmt.Sprintf("%X", handle.Info_hash().To_string()))
-	delete(b.paused, fmt.Sprintf("%X", handle.Info_hash().To_string()))
+	delete(b.connectionInfos, b.getTorrentInfoHash(handle))
 	b.removeChan <- true
 
-	{
-		hash := fmt.Sprintf("%X", handle.Info_hash().To_string())
-		name := handle.Status().GetName()
-		log.Printf("%v: %v removed", hash[0:4], name)
-		trackingEvent("Removed", map[string]interface{}{"Magnet InfoHash": hash, "Magnet Name": name})
-	}
+	log.Printf("[scrapmagnet] Removed %v", handle.Status().GetName())
+	trackingEvent("Removed", map[string]interface{}{"Magnet InfoHash": b.getTorrentInfoHash(handle), "Magnet Name": handle.Status().GetName()})
 }
 
 func (b *BitTorrent) onTorrentDeleted(infoHash string, success bool) {
 	b.deleteChan <- success
 
 	{
-		hash := fmt.Sprintf("%X", infoHash)[0:4]
-
 		if success {
-			log.Printf("%v: deleted", hash)
+			log.Printf("[scrapmagnet] Deleted")
 		} else {
-			log.Printf("%v: delete failed", hash)
+			log.Printf("[scrapmagnet] Delete failed")
 		}
 	}
 }

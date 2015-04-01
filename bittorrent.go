@@ -158,7 +158,7 @@ func (tfi *TorrentFileInfo) Read(data []byte) (int, error) {
 
 	if tfi.bytesRead > (10*1024*1024) && !bitTorrent.connectionInfos[tfi.GetInfoHashStr()].Served {
 		log.Printf("[scrapmagnet] Serving %v", tfi.handle.Status().GetName())
-		trackingEvent("Serving", map[string]interface{}{"Magnet InfoHash": tfi.GetInfoHashStr(), "Magnet Name": tfi.handle.Status().GetName()})
+		trackingEvent("Serving", map[string]interface{}{"Magnet InfoHash": tfi.GetInfoHashStr(), "Magnet Name": tfi.handle.Status().GetName()}, bitTorrent.mixpanelData[tfi.GetInfoHashStr()])
 		bitTorrent.connectionInfos[tfi.GetInfoHashStr()].Served = true
 	}
 
@@ -339,6 +339,7 @@ func NewTorrentConnectionInfo() *TorrentConnectionInfo {
 type BitTorrent struct {
 	session         libtorrent.Session
 	lookAhead       map[string]float32
+	mixpanelData    map[string]string
 	connectionInfos map[string]*TorrentConnectionInfo
 	removeChan      chan bool
 	deleteChan      chan bool
@@ -347,6 +348,7 @@ type BitTorrent struct {
 func NewBitTorrent() *BitTorrent {
 	return &BitTorrent{
 		lookAhead:       make(map[string]float32),
+		mixpanelData:    make(map[string]string),
 		connectionInfos: make(map[string]*TorrentConnectionInfo),
 		removeChan:      make(chan bool),
 		deleteChan:      make(chan bool),
@@ -427,7 +429,7 @@ func (b *BitTorrent) Stop() {
 	b.session.Stop_dht()
 }
 
-func (b *BitTorrent) AddTorrent(magnetLink string, downloadDir string, infoHash string, lookAhead float32) {
+func (b *BitTorrent) AddTorrent(magnetLink string, downloadDir string, infoHash string, lookAhead float32, mixpanelData string) {
 	addTorrentParams := libtorrent.NewAdd_torrent_params()
 	addTorrentParams.SetUrl(magnetLink)
 	addTorrentParams.SetSave_path(downloadDir)
@@ -437,6 +439,11 @@ func (b *BitTorrent) AddTorrent(magnetLink string, downloadDir string, infoHash 
 	if _, ok := b.lookAhead[infoHash]; !ok {
 		b.lookAhead[infoHash] = lookAhead
 	}
+
+	if _, ok := b.mixpanelData[infoHash]; !ok {
+		b.mixpanelData[infoHash] = mixpanelData
+	}
+
 	b.session.Async_add_torrent(addTorrentParams)
 }
 
@@ -604,7 +611,7 @@ func (b *BitTorrent) onTorrentAdded(handle libtorrent.Torrent_handle) {
 	}()
 
 	log.Printf("[scrapmagnet] Added %v", handle.Status().GetName())
-	trackingEvent("Added", map[string]interface{}{"Magnet InfoHash": b.getTorrentInfoHash(handle), "Magnet Name": handle.Status().GetName()})
+	trackingEvent("Added", map[string]interface{}{"Magnet InfoHash": b.getTorrentInfoHash(handle), "Magnet Name": handle.Status().GetName()}, b.mixpanelData[infoHash])
 }
 
 func (b *BitTorrent) onMetadataReceived(handle libtorrent.Torrent_handle) {
@@ -614,7 +621,7 @@ func (b *BitTorrent) onMetadataReceived(handle libtorrent.Torrent_handle) {
 	}
 
 	log.Printf("[scrapmagnet] Metadata received %v", handle.Status().GetName())
-	trackingEvent("Metadata received", map[string]interface{}{"Magnet InfoHash": b.getTorrentInfoHash(handle), "Magnet Name": handle.Status().GetName()})
+	trackingEvent("Metadata received", map[string]interface{}{"Magnet InfoHash": b.getTorrentInfoHash(handle), "Magnet Name": handle.Status().GetName()}, b.mixpanelData[b.getTorrentInfoHash(handle)])
 }
 
 func (b *BitTorrent) onTorrentPaused(handle libtorrent.Torrent_handle) {
@@ -633,16 +640,17 @@ func (b *BitTorrent) onTorrentResumed(handle libtorrent.Torrent_handle) {
 
 func (b *BitTorrent) onTorrentFinished(handle libtorrent.Torrent_handle) {
 	log.Printf("[scrapmagnet] Finished %v", handle.Status().GetName())
-	trackingEvent("Finished", map[string]interface{}{"Magnet InfoHash": b.getTorrentInfoHash(handle), "Magnet Name": handle.Status().GetName()})
+	trackingEvent("Finished", map[string]interface{}{"Magnet InfoHash": b.getTorrentInfoHash(handle), "Magnet Name": handle.Status().GetName()}, b.mixpanelData[b.getTorrentInfoHash(handle)])
 }
 
 func (b *BitTorrent) onTorrentRemoved(handle libtorrent.Torrent_handle) {
+	delete(b.mixpanelData, b.getTorrentInfoHash(handle))
 	delete(b.lookAhead, b.getTorrentInfoHash(handle))
 	delete(b.connectionInfos, b.getTorrentInfoHash(handle))
 	b.removeChan <- true
 
 	log.Printf("[scrapmagnet] Removed %v", handle.Status().GetName())
-	trackingEvent("Removed", map[string]interface{}{"Magnet InfoHash": b.getTorrentInfoHash(handle), "Magnet Name": handle.Status().GetName()})
+	trackingEvent("Removed", map[string]interface{}{"Magnet InfoHash": b.getTorrentInfoHash(handle), "Magnet Name": handle.Status().GetName()}, b.mixpanelData[b.getTorrentInfoHash(handle)])
 }
 
 func (b *BitTorrent) onTorrentDeleted(infoHash string, success bool) {

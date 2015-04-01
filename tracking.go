@@ -35,12 +35,20 @@ func peopleSet() {
 	people.Update("$set", properties)
 }
 
-func trackingEvent(eventName string, properties map[string]interface{}) {
+func trackingEvent(eventName string, properties map[string]interface{}, mixpanelData string) {
 	properties["Server OS"] = runtime.GOOS
 	properties["Server Arch"] = runtime.GOARCH
 
 	if settings.mixpanelData != "" {
 		if data, err := base64.StdEncoding.DecodeString(settings.mixpanelData); err == nil {
+			json.Unmarshal([]byte(data), &properties)
+		} else {
+			log.Print(err)
+		}
+	}
+
+	if mixpanelData != "" {
+		if data, err := base64.StdEncoding.DecodeString(mixpanelData); err == nil {
 			json.Unmarshal([]byte(data), &properties)
 		} else {
 			log.Print(err)

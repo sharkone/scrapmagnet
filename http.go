@@ -79,12 +79,13 @@ func video(w http.ResponseWriter, r *http.Request) {
 	downloadDir := getQueryParam(r, "download_dir", ".")
 	preview := getQueryParam(r, "preview", "0")
 	lookAhead, _ := strconv.ParseFloat(getQueryParam(r, "look_ahead", "0.005"), 32)
+	mixpanelData := getQueryParam(r, "mixpanel_data", "")
 
 	if magnetLink != "" {
 		if regExpMatch := regexp.MustCompile(`xt=urn:btih:([a-zA-Z0-9]+)`).FindStringSubmatch(magnetLink); len(regExpMatch) == 2 {
 			infoHash := strings.ToUpper(regExpMatch[1])
 
-			httpInstance.bitTorrent.AddTorrent(magnetLink, downloadDir, infoHash, float32(lookAhead))
+			httpInstance.bitTorrent.AddTorrent(magnetLink, downloadDir, infoHash, float32(lookAhead), mixpanelData)
 
 			if torrentInfo := httpInstance.bitTorrent.GetTorrentInfo(infoHash); torrentInfo != nil {
 				httpInstance.bitTorrent.AddConnection(infoHash)

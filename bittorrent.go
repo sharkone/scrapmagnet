@@ -644,13 +644,13 @@ func (b *BitTorrent) onTorrentFinished(handle libtorrent.Torrent_handle) {
 }
 
 func (b *BitTorrent) onTorrentRemoved(handle libtorrent.Torrent_handle) {
+	log.Printf("[scrapmagnet] Removed %v", handle.Status().GetName())
+	trackingEvent("Removed", map[string]interface{}{"Magnet InfoHash": b.getTorrentInfoHash(handle), "Magnet Name": handle.Status().GetName()}, b.mixpanelData[b.getTorrentInfoHash(handle)])
+
 	delete(b.mixpanelData, b.getTorrentInfoHash(handle))
 	delete(b.lookAhead, b.getTorrentInfoHash(handle))
 	delete(b.connectionInfos, b.getTorrentInfoHash(handle))
 	b.removeChan <- true
-
-	log.Printf("[scrapmagnet] Removed %v", handle.Status().GetName())
-	trackingEvent("Removed", map[string]interface{}{"Magnet InfoHash": b.getTorrentInfoHash(handle), "Magnet Name": handle.Status().GetName()}, b.mixpanelData[b.getTorrentInfoHash(handle)])
 }
 
 func (b *BitTorrent) onTorrentDeleted(infoHash string, success bool) {

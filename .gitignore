@@ -23,9 +23,11 @@ _testmain.go
 *.test
 *.prof
 
+android_arm
 darwin_amd64
 linux_386
 linux_amd64
+linux_arm
 windows_386
 
 .DS_Store

@@ -589,7 +589,7 @@ func (b *BitTorrent) onTorrentAdded(handle libtorrent.Torrent_handle) {
 							select {
 							case <-resumeChan:
 								break Watcher
-							case <-time.After(time.Duration(4) * time.Second):
+							case <-time.After(time.Duration(settings.inactivityPauseTimeout) * time.Second):
 								b.pauseTorrent(handle)
 								paused = true
 							}
